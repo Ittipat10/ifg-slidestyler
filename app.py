@@ -55,13 +55,15 @@ st.markdown("""
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
     }
 
-    [data-testid="stHeader"] {
-        background: transparent !important;
-    }
-
-    [data-testid="stToolbar"] {
-        right: 1.5rem;
-    }
+    /* Hide Streamlit Header, GitHub ribbon & Watermarks */
+    #MainMenu {visibility: hidden !important; display: none !important;}
+    header {visibility: hidden !important; display: none !important;}
+    footer {visibility: hidden !important; display: none !important;}
+    [data-testid="stHeader"] {display: none !important;}
+    [data-testid="stToolbar"] {visibility: hidden !important; display: none !important;}
+    [data-testid="stDecoration"] {display: none !important;}
+    [data-testid="stStatusWidget"] {display: none !important;}
+    .stAppDeployButton {display: none !important;}
 
     .block-container {
         padding-top: 1.5rem !important;

@@ -1733,7 +1733,9 @@ def build_arsipa_presentation(template_file, user_file):
     aspect_differs = abs(sx - sy) > 0.04
     max_header_right = int(11.85 * 914400)  # Keep top headers clear of top-right Vorlage logo
 
-    used_partnames = {str(p.partname) for p in output_prs.part.package.parts}
+    pkg = output_prs.part.package
+    pkg_parts = list(pkg.iter_parts()) if hasattr(pkg, "iter_parts") else getattr(pkg, "parts", [])
+    used_partnames = {str(p.partname) for p in pkg_parts}
     part_memo = {}
     processed_slides = []
 

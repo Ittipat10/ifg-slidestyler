@@ -1,0 +1,19 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment and secrets
+.env
+.venv/
+env/
+venv/
+
+# User test presentations and output files
+*.pptx
+!Arsipa Vorlage/*.pptx
+Example /
+
+# Development and agent files
+.agents/
+.DS_Store

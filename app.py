@@ -318,6 +318,9 @@ DGM_NS = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
 DSP_NS = "http://schemas.microsoft.com/office/drawing/2008/diagram"
 
 CORPORATE_FONT = "Abadi"
+TITLE_FONT_SZ = "2800"         # Official Vorlage 'Titel' size: 28 pt
+KAPITEL_FONT_SZ = "1200"       # Official Vorlage 'Kapitel' size: 12 pt
+VORLAGE_KAPITEL_GRAY = "808080"  # Matches Vorlage slideLayout1 bg1 lumMod=50000
 
 # Official IfG / Arsipa Corporate Color Palette (from Vorlage theme1.xml)
 IFG_NAVY = "012641"       # Primary Brand Dark Navy (Headings, Primary Boxes, Headers)
@@ -370,14 +373,21 @@ def safe_shape_type(shape):
 
 
 def scan_arsipa_template(template_prs):
-    """Finds the clean corporate canvas layout ('Leere Folie') in the Vorlage."""
+    """Finds the cover layout ('Kapitel mit großem Bild') and corporate canvas layout ('Leere Folie') in the Vorlage."""
     canvas_idx = 0
+    cover_idx = 0
+    found_cover = False
     for idx, layout in enumerate(template_prs.slide_layouts):
         name_lower = layout.name.lower() if layout.name else ""
         if "leere folie" in name_lower or "blank" in name_lower:
             canvas_idx = idx
-            break
-    return {"canvas_leere_folie": canvas_idx}
+        if not found_cover and ("kapitel mit großem bild" in name_lower or "titel" in name_lower or "cover" in name_lower):
+            cover_idx = idx
+            found_cover = True
+    return {
+        "canvas_leere_folie": canvas_idx,
+        "cover_layout": cover_idx,
+    }
 
 
 # ----------------- 1. COLOR & THEME RESOLUTION ENGINE -----------------
@@ -556,6 +566,15 @@ def resolve_color_from_parent(parent_el, theme_map, ph_rgb=None):
                 base = (r, g, b)
             except ValueError:
                 base = (0, 0, 0)
+        elif ctag == "hslClr":
+            try:
+                h_val = (int(ch.get("hue", "0")) / 60000.0 % 360.0) / 360.0
+                s_val = max(0.0, min(1.0, int(ch.get("sat", "0")) / 100000.0))
+                l_val = max(0.0, min(1.0, int(ch.get("lum", "0")) / 100000.0))
+                rf, gf, bf = colorsys.hls_to_rgb(h_val, l_val, s_val)
+                base = (int(round(rf * 255)), int(round(gf * 255)), int(round(bf * 255)))
+            except ValueError:
+                base = (0, 0, 0)
         if base is not None:
             return apply_oxml_color_mods(base, ch)
     return None
@@ -593,32 +612,41 @@ class DeckColorMapper:
         mid_counts = Counter()
         light_counts = Counter()
 
+        seen_layouts = set()
         for slide in user_prs.slides:
             tmap = extract_slide_theme_map(slide)
-            root = slide._element
-            for parent in root.iter():
-                ptag = parent.tag.split("}")[-1]
-                if ptag in ("solidFill", "gs", "fillRef", "lnRef"):
-                    # Skip drop shadows
-                    anc_tags = {a.tag.split("}")[-1] for a in parent.iterancestors()}
-                    if "effectLst" in anc_tags:
-                        continue
-                    res = resolve_color_from_parent(parent, tmap)
-                    if res is None:
-                        continue
-                    rgb, _ = res
-                    sat = rgb_saturation(rgb)
-                    lum = perceived_brightness(rgb)
-                    if sat < 0.12:
-                        continue
-                    # Quantize slightly to group identical brand colors
-                    q = (rgb[0] // 8 * 8, rgb[1] // 8 * 8, rgb[2] // 8 * 8)
-                    if lum < 0.38:
-                        dark_counts[q] += 1
-                    elif lum < 0.76:
-                        mid_counts[q] += 1
-                    else:
-                        light_counts[q] += 1
+            roots_to_scan = [slide._element]
+            try:
+                lay_el = slide.slide_layout._element
+                if id(lay_el) not in seen_layouts:
+                    seen_layouts.add(id(lay_el))
+                    roots_to_scan.append(lay_el)
+            except Exception:
+                pass
+            for root in roots_to_scan:
+                for parent in root.iter():
+                    ptag = parent.tag.split("}")[-1]
+                    if ptag in ("solidFill", "gs", "fillRef", "lnRef"):
+                        # Skip drop shadows
+                        anc_tags = {a.tag.split("}")[-1] for a in parent.iterancestors()}
+                        if "effectLst" in anc_tags:
+                            continue
+                        res = resolve_color_from_parent(parent, tmap)
+                        if res is None:
+                            continue
+                        rgb, _ = res
+                        sat = rgb_saturation(rgb)
+                        lum = perceived_brightness(rgb)
+                        if sat < 0.12:
+                            continue
+                        # Quantize slightly to group identical brand colors
+                        q = (rgb[0] // 8 * 8, rgb[1] // 8 * 8, rgb[2] // 8 * 8)
+                        if lum < 0.38:
+                            dark_counts[q] += 1
+                        elif lum < 0.76:
+                            mid_counts[q] += 1
+                        else:
+                            light_counts[q] += 1
 
         self.dark_clusters = self._assign_clusters(dark_counts, DARK_BRAND_SWATCHES)
         self.mid_clusters = self._assign_clusters(mid_counts, MID_BRAND_SWATCHES)
@@ -723,11 +751,12 @@ def apply_corporate_font_to_rpr(rpr_el, run_text=""):
             f_el.set("typeface", CORPORATE_FONT)
 
 
-def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, style_font_rgb=None, font_scale=1.0):
+def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, style_font_rgb=None, font_scale=1.0, header_size_mode=None):
     """
     Restyles all runs in a <p:txBody> / <a:txBody> to Abadi + Corporate Colors
     while preserving 100% of original paragraphs, line breaks, spacing, bullets,
     alignments, bold/italic, and ensuring readable contrast against bg_lum.
+    When header_size_mode is 'title' or 'kapitel', enforces official 28pt (2800) / 12pt (1200) sizes.
     """
     if txbody is None:
         return
@@ -749,10 +778,16 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                     if def_rpr.get("sz"):
                         try:
                             lst_lvl_sizes[lvl_num] = int(def_rpr.get("sz"))
-                            if abs(font_scale - 1.0) > 0.02:
+                            if header_size_mode == "title":
+                                def_rpr.set("sz", TITLE_FONT_SZ)
+                            elif header_size_mode == "kapitel":
+                                def_rpr.set("sz", KAPITEL_FONT_SZ)
+                            elif abs(font_scale - 1.0) > 0.02:
                                 def_rpr.set("sz", str(int(round(lst_lvl_sizes[lvl_num] * font_scale))))
                         except ValueError:
                             pass
+                    elif header_size_mode in ("title", "kapitel"):
+                        def_rpr.set("sz", TITLE_FONT_SZ if header_size_mode == "title" else KAPITEL_FONT_SZ)
                     def_sf = def_rpr.find(qn_a("solidFill"))
                     if def_sf is not None:
                         write_srgb_into_parent(def_sf, IFG_WHITE if bg_lum < 0.48 else (IFG_NAVY if is_heading_shape else IFG_CHARCOAL))
@@ -787,6 +822,8 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                         p_def_sz = int(def_rpr.get("sz"))
                     except ValueError:
                         pass
+                if header_size_mode in ("title", "kapitel"):
+                    def_rpr.set("sz", TITLE_FONT_SZ if header_size_mode == "title" else KAPITEL_FONT_SZ)
                 def_sf = def_rpr.find(qn_a("solidFill"))
                 if def_sf is not None:
                     write_srgb_into_parent(def_sf, IFG_WHITE if bg_lum < 0.48 else (IFG_NAVY if is_heading_shape else IFG_CHARCOAL))
@@ -815,8 +852,22 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                     except ValueError:
                         pass
 
-                # Scale font size proportionally only if slide scale != 1.0
-                if abs(font_scale - 1.0) > 0.02 and rpr.get("sz"):
+                is_kicker_run_in_title = (
+                    header_size_mode == "title"
+                    and max_sz > 0
+                    and run_sz > 0
+                    and run_sz <= max_sz - 400
+                    and run_sz <= 1800
+                )
+
+                # Enforce official Title (28pt) / Kapitel (12pt) sizes or scale proportionally
+                if header_size_mode == "kapitel" or is_kicker_run_in_title:
+                    rpr.set("sz", KAPITEL_FONT_SZ)
+                    rpr.set("b", "0")
+                elif header_size_mode == "title":
+                    rpr.set("sz", TITLE_FONT_SZ)
+                    rpr.set("b", "0")
+                elif abs(font_scale - 1.0) > 0.02 and rpr.get("sz"):
                     try:
                         rpr.set("sz", str(int(round(int(rpr.get("sz")) * font_scale))))
                     except ValueError:
@@ -833,6 +884,10 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                 # Choose corporate text color with strict contrast guarantee
                 if bg_lum < 0.48:
                     new_txt_hex = IFG_WHITE
+                elif header_size_mode == "kapitel" or is_kicker_run_in_title:
+                    new_txt_hex = VORLAGE_KAPITEL_GRAY
+                elif header_size_mode == "title":
+                    new_txt_hex = IFG_NAVY
                 else:
                     orig_sat = rgb_saturation(orig_rgb)
                     orig_lum = perceived_brightness(orig_rgb)
@@ -876,6 +931,10 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                         write_srgb_into_parent(fld_sf, IFG_WHITE if bg_lum < 0.48 else IFG_CHARCOAL)
                     apply_corporate_font_to_rpr(rpr)
             elif ctag == "endParaRPr":
+                if header_size_mode == "kapitel":
+                    child.set("sz", KAPITEL_FONT_SZ)
+                elif header_size_mode == "title":
+                    child.set("sz", TITLE_FONT_SZ)
                 end_sf = child.find(qn_a("solidFill"))
                 if end_sf is not None:
                     write_srgb_into_parent(end_sf, IFG_WHITE if bg_lum < 0.48 else (IFG_NAVY if is_heading_shape else IFG_CHARCOAL))
@@ -885,14 +944,26 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
 # ----------------- 3. PLACEHOLDER & GEOMETRY MATERIALIZATION -----------------
 
 def find_inherited_placeholder(old_slide, ph_idx, ph_type):
-    """Finds matching layout and master placeholder elements for style inheritance."""
+    """
+    Finds matching layout and master placeholder elements for style/fill/geometry inheritance.
+    Strictly prefers exact placeholder idx matches on each container before falling back to type.
+    """
     matches = []
     for container in (old_slide.slide_layout, old_slide.slide_layout.slide_master):
         try:
+            exact_match = None
+            type_match = None
             for sh in container.placeholders:
-                if sh.placeholder_format.idx == ph_idx or (ph_type is not None and sh.placeholder_format.type == ph_type):
-                    matches.append(sh._element)
+                c_idx = sh.placeholder_format.idx
+                c_type = sh.placeholder_format.type
+                if ph_idx is not None and c_idx == ph_idx:
+                    exact_match = sh._element
                     break
+                if type_match is None and ph_type is not None and c_type == ph_type:
+                    type_match = sh._element
+            chosen = exact_match if exact_match is not None else type_match
+            if chosen is not None:
+                matches.append(chosen)
         except Exception:
             pass
     return matches
@@ -930,8 +1001,71 @@ def extract_inherited_level_props(ph_elems, is_title_ph=False):
     return props
 
 
-def should_skip_source_shape(sh):
-    """Skips hidden 0x0 think-cell metadata and empty/system placeholders (slide number, date, empty footer)."""
+def shape_has_visual_fill(el):
+    """Returns True if <p:sp> has an explicit visual fill in <p:spPr> or <p:style>/<a:fillRef>."""
+    if el is None:
+        return False
+    sp_pr = el.find(qn_p("spPr"))
+    if sp_pr is not None:
+        if sp_pr.find(qn_a("noFill")) is not None:
+            return False
+        if any(sp_pr.find(qn_a(ft)) is not None for ft in ("solidFill", "gradFill", "blipFill", "pattFill")):
+            return True
+    fill_ref = el.find(f"{{{P_NS}}}style/{{{A_NS}}}fillRef")
+    if fill_ref is not None and fill_ref.get("idx", "0") != "0":
+        return True
+    return False
+
+
+def get_pic_embed_sha1(sh, slide):
+    """Returns SHA1 of an embedded picture on slide if small/checkable, else None."""
+    try:
+        if sh._element.tag.split("}")[-1] != "pic":
+            return None
+        blip = sh._element.find(f".//{{{A_NS}}}blip")
+        if blip is None:
+            return None
+        rid = blip.get(f"{{{R_NS}}}embed")
+        if not rid or rid not in slide.part.rels:
+            return None
+        rel = slide.part.rels[rid]
+        if rel.is_external:
+            return None
+        return hashlib.sha1(rel.target_part.blob).hexdigest()
+    except Exception:
+        return None
+
+
+def detect_repeated_corner_logos(user_prs, scale, dx, dy):
+    """
+    Identifies small top-right corner logo images repeated across >= 3 content slides
+    so old template corner logos don't double-stack over the official Vorlage 'a.' logo.
+    """
+    sha_slide_sets = collections.defaultdict(set)
+    for s_idx, slide in enumerate(user_prs.slides):
+        if s_idx == 0:
+            continue
+        for sh in slide.shapes:
+            if sh._element.tag.split("}")[-1] != "pic":
+                continue
+            x1 = (sh.left or 0) * scale + dx
+            y1 = (sh.top or 0) * scale + dy
+            w = (sh.width or 0) * scale
+            h = (sh.height or 0) * scale
+            if (
+                x1 >= int(9.9 * 914400)
+                and (y1 + h) <= int(1.60 * 914400)
+                and 0 < w <= int(3.15 * 914400)
+                and 0 < h <= int(1.40 * 914400)
+            ):
+                sha = get_pic_embed_sha1(sh, slide)
+                if sha:
+                    sha_slide_sets[sha].add(s_idx)
+    return {sha for sha, slides in sha_slide_sets.items() if len(slides) >= 3}
+
+
+def should_skip_source_shape(sh, slide=None, repeated_corner_logos=None, scale=1.0, dx=0.0, dy=0.0):
+    """Skips hidden 0x0 think-cell metadata, repeated old corner logos, and empty/system placeholders."""
     name_low = (sh.name or "").lower()
     if "think-cell" in name_low:
         return True
@@ -942,6 +1076,21 @@ def should_skip_source_shape(sh):
         h = sh.height or 0
         if w <= 5000 and h <= 5000:
             return True
+
+    if repeated_corner_logos and slide is not None and sh._element.tag.split("}")[-1] == "pic":
+        x1 = (sh.left or 0) * scale + dx
+        y1 = (sh.top or 0) * scale + dy
+        w = (sh.width or 0) * scale
+        h = (sh.height or 0) * scale
+        if (
+            x1 >= int(9.9 * 914400)
+            and (y1 + h) <= int(1.60 * 914400)
+            and 0 < w <= int(3.15 * 914400)
+            and 0 < h <= int(1.40 * 914400)
+        ):
+            sha = get_pic_embed_sha1(sh, slide)
+            if sha in repeated_corner_logos:
+                return True
 
     if sh.is_placeholder:
         try:
@@ -954,7 +1103,7 @@ def should_skip_source_shape(sh):
         tag = sh._element.tag.split("}")[-1]
         if tag == "sp":
             has_txt = getattr(sh, "has_text_frame", False) and sh.text_frame and sh.text_frame.text.strip()
-            has_fill = sh._element.find(f"{{{P_NS}}}spPr/{{{A_NS}}}blipFill") is not None
+            has_fill = shape_has_visual_fill(sh._element)
             if not has_txt and not has_fill:
                 return True
 
@@ -998,7 +1147,7 @@ def insert_ppr_bunone(ppr):
 
 
 def ensure_explicit_xfrm(elem, x, y, cx, cy):
-    """Ensures a shape/picture/graphicFrame XML element has explicit coordinates."""
+    """Ensures a shape/picture/graphicFrame XML element has explicit coordinates and valid geometry."""
     tag = elem.tag.split("}")[-1]
     if tag == "graphicFrame":
         xfrm = elem.find(qn_p("xfrm"))
@@ -1023,7 +1172,8 @@ def ensure_explicit_xfrm(elem, x, y, cx, cy):
         if xfrm is None:
             xfrm = etree.Element(qn_a("xfrm"))
             sp_pr.insert(0, xfrm)
-        if tag == "pic" and sp_pr.find(qn_a("prstGeom")) is None and sp_pr.find(qn_a("custGeom")) is None:
+        # Critical: both <p:pic> and materialized <p:sp> require <a:prstGeom> or <a:custGeom> to render fills/borders!
+        if tag in ("pic", "sp") and sp_pr.find(qn_a("prstGeom")) is None and sp_pr.find(qn_a("custGeom")) is None:
             prst = etree.Element(qn_a("prstGeom"))
             prst.set("prst", "rect")
             etree.SubElement(prst, qn_a("avLst"))
@@ -1046,9 +1196,9 @@ def ensure_explicit_xfrm(elem, x, y, cx, cy):
 
 def materialize_placeholder_and_transform(sh, elem, old_slide, scale, dx, dy, is_top_left_header=False, max_header_right=None):
     """
-    Materializes inherited placeholder coordinates/typography if sh.is_placeholder,
-    strips <p:ph> so it never collides with Vorlage placeholders, and applies
-    aspect-ratio-safe slide coordinate mapping.
+    Materializes inherited placeholder coordinates, geometry, fills, borders, bodyPr margins/anchor,
+    and typography if sh.is_placeholder, strips <p:ph> so it never collides with Vorlage placeholders,
+    and applies aspect-ratio-safe slide coordinate mapping.
     """
     orig_x = sh.left if sh.left is not None else 0
     orig_y = sh.top if sh.top is not None else 0
@@ -1067,10 +1217,107 @@ def materialize_placeholder_and_transform(sh, elem, old_slide, scale, dx, dy, is
             pass
 
         inherited_els = find_inherited_placeholder(old_slide, ph_idx, ph_type)
+
+        # Fallback coordinates from layout/master placeholder if python-pptx had 0x0
+        if orig_cx == 0 and orig_cy == 0:
+            for inh_el in inherited_els:
+                inh_bbox = get_local_bbox(inh_el)
+                if inh_bbox is not None and (inh_bbox[2] - inh_bbox[0]) > 0:
+                    orig_x, orig_y = inh_bbox[0], inh_bbox[1]
+                    orig_cx, orig_cy = inh_bbox[2] - inh_bbox[0], inh_bbox[3] - inh_bbox[1]
+                    break
+
+        # Inherit geometry, fill, border, and <p:style> from layout/master placeholder onto <p:sp>
+        if elem.tag.split("}")[-1] == "sp" and inherited_els:
+            sp_pr = elem.find(qn_p("spPr"))
+            if sp_pr is None:
+                sp_pr = etree.Element(qn_p("spPr"))
+                elem.insert(1, sp_pr)
+
+            # 1) Inherit geometry (prstGeom / custGeom)
+            if sp_pr.find(qn_a("prstGeom")) is None and sp_pr.find(qn_a("custGeom")) is None:
+                for inh_el in inherited_els:
+                    inh_sppr = inh_el.find(qn_p("spPr"))
+                    if inh_sppr is not None:
+                        geom = inh_sppr.find(qn_a("custGeom"))
+                        if geom is None:
+                            geom = inh_sppr.find(qn_a("prstGeom"))
+                        if geom is not None:
+                            insert_sppr_child(sp_pr, deepcopy(geom), slot_rank=1)
+                            break
+
+            # 2) Inherit fill (solidFill / gradFill / pattFill / noFill)
+            fill_tags = ("noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill")
+            if not any(sp_pr.find(qn_a(ft)) is not None for ft in fill_tags):
+                for inh_el in inherited_els:
+                    inh_sppr = inh_el.find(qn_p("spPr"))
+                    if inh_sppr is not None:
+                        found_fill = None
+                        for ft in fill_tags:
+                            cand = inh_sppr.find(qn_a(ft))
+                            if cand is not None:
+                                found_fill = cand
+                                break
+                        if found_fill is not None:
+                            if found_fill.tag.split("}")[-1] != "blipFill":
+                                insert_sppr_child(sp_pr, deepcopy(found_fill), slot_rank=2)
+                            break
+
+            # 3) Inherit border (<a:ln>)
+            if sp_pr.find(qn_a("ln")) is None:
+                for inh_el in inherited_els:
+                    inh_ln = inh_el.find(f"{{{P_NS}}}spPr/{{{A_NS}}}ln")
+                    if inh_ln is not None:
+                        insert_sppr_child(sp_pr, deepcopy(inh_ln), slot_rank=3)
+                        break
+
+            # 4) Inherit <p:style> (<a:fillRef>, <a:lnRef>, <a:fontRef>)
+            if elem.find(qn_p("style")) is None:
+                for inh_el in inherited_els:
+                    inh_style = inh_el.find(qn_p("style"))
+                    if inh_style is not None:
+                        sp_pr_idx = list(elem).index(sp_pr)
+                        elem.insert(sp_pr_idx + 1, deepcopy(inh_style))
+                        break
+
         lvl_props = extract_inherited_level_props(inherited_els, is_title_ph=is_title_ph)
 
         txbody = elem.find(qn_p("txBody"))
         if txbody is not None:
+            # 5) Inherit <a:bodyPr> vertical alignment (anchor="ctr"/"b"/"t"), padding insets, wrap, vert
+            body_pr = txbody.find(qn_a("bodyPr"))
+            if body_pr is None:
+                body_pr = etree.Element(qn_a("bodyPr"))
+                txbody.insert(0, body_pr)
+
+            inh_bpr_attrs = {}
+            inh_autofit = None
+            for inh_el in reversed(inherited_els):
+                ibpr = inh_el.find(f".//{{{P_NS}}}txBody/{{{A_NS}}}bodyPr")
+                if ibpr is not None:
+                    for k, v in ibpr.attrib.items():
+                        inh_bpr_attrs[k] = v
+                    for af_tag in ("noAutofit", "normAutofit", "spAutoFit"):
+                        af_el = ibpr.find(qn_a(af_tag))
+                        if af_el is not None:
+                            inh_autofit = af_el
+
+            for attr_k in ("anchor", "anchorCtr", "vert", "wrap", "lIns", "tIns", "rIns", "bIns", "numCol", "spcCol", "rtlCol", "spcFirstLastPara"):
+                if attr_k in inh_bpr_attrs and body_pr.get(attr_k) is None:
+                    body_pr.set(attr_k, inh_bpr_attrs[attr_k])
+
+            if abs(scale - 1.0) > 0.02:
+                for ins_k in ("lIns", "tIns", "rIns", "bIns"):
+                    if body_pr.get(ins_k) is not None:
+                        try:
+                            body_pr.set(ins_k, str(int(round(int(body_pr.get(ins_k)) * scale))))
+                        except ValueError:
+                            pass
+
+            if inh_autofit is not None and not any(body_pr.find(qn_a(t)) is not None for t in ("noAutofit", "normAutofit", "spAutoFit")):
+                ins_idx = 1 if (len(body_pr) > 0 and body_pr[0].tag.split("}")[-1] == "prstTxWarp") else 0
+                body_pr.insert(ins_idx, deepcopy(inh_autofit))
+
             for p in txbody.findall(qn_a("p")):
                 ppr = p.find(qn_a("pPr"))
                 lvl = int(ppr.get("lvl", "0")) if ppr is not None else 0
@@ -1135,6 +1382,77 @@ def materialize_placeholder_and_transform(sh, elem, old_slide, scale, dx, dy, is
     return (new_x, new_y, new_x + new_cx, new_y + new_cy)
 
 
+def extract_layout_background_panels(old_slide, old_w, old_h):
+    """
+    Extracts large non-placeholder colored background panels (e.g., full-height sidebars
+    or header banners) defined on old_slide.slide_layout so they are preserved on 'Leere Folie'.
+    """
+    if old_slide._element.get("showMasterSp") == "0":
+        return []
+    panels = []
+    try:
+        lay = old_slide.slide_layout
+        tmap = extract_slide_theme_map(old_slide)
+        slide_boxes = []
+        for s_el in old_slide._element.findall(f".//{{{P_NS}}}spTree/{{{P_NS}}}sp"):
+            sb = get_local_bbox(s_el)
+            if sb is not None and shape_has_visual_fill(s_el):
+                slide_boxes.append(sb)
+
+        for lel in lay._element.findall(f".//{{{P_NS}}}spTree/{{{P_NS}}}sp"):
+            if lel.find(f".//{{{P_NS}}}ph") is not None:
+                continue
+            txt = "".join(t.text or "" for t in lel.iter(qn_a("t"))).strip()
+            if txt:
+                continue
+            if not shape_has_visual_fill(lel):
+                continue
+            lb = get_local_bbox(lel)
+            if lb is None:
+                continue
+            x1, y1, x2, y2 = lb
+            w, h = x2 - x1, y2 - y1
+            # Must be an on-canvas structural rectangular panel (excludes tiny dashes & huge off-canvas decorations)
+            if (
+                x1 < -300000 or y1 < -300000
+                or x2 > old_w + 300000 or y2 > old_h + 300000
+                or w < 0.18 * old_w or h < 0.18 * old_h
+                or (w * h) < 0.10 * (old_w * old_h)
+            ):
+                continue
+
+            # Resolve fill brightness to skip plain white background rectangles
+            sp_pr = lel.find(qn_p("spPr"))
+            res = None
+            if sp_pr is not None:
+                sf = sp_pr.find(qn_a("solidFill"))
+                gf = sp_pr.find(qn_a("gradFill"))
+                if sf is not None:
+                    res = resolve_color_from_parent(sf, tmap)
+                elif gf is not None:
+                    gs = gf.find(f".//{{{A_NS}}}gs")
+                    res = resolve_color_from_parent(gs, tmap)
+            if res is None:
+                fref = lel.find(f"{{{P_NS}}}style/{{{A_NS}}}fillRef")
+                res = resolve_color_from_parent(fref, tmap)
+            if res is not None and perceived_brightness(res[0]) >= 0.95 and rgb_saturation(res[0]) < 0.08:
+                continue
+
+            # Skip if old_slide already has a filled shape covering essentially the same panel box
+            already_covered = False
+            for sx1, sy1, sx2, sy2 in slide_boxes:
+                ix = max(0, min(x2, sx2) - max(x1, sx1))
+                iy = max(0, min(y2, sy2) - max(y1, sy1))
+                if (ix * iy) > 0.75 * (w * h):
+                    already_covered = True
+                    break
+            if not already_covered:
+                panels.append((lel, (x1, y1, w, h), lay))
+    except Exception:
+        pass
+    return panels
+
+
 # ----------------- 4. DEEP SHAPE, GROUP, TABLE, SMARTART & CHART RESTYLER -----------------
 
 def get_bg_lum_under_box(bbox, z_bg_stack, default_lum=1.0):
@@ -1172,7 +1490,7 @@ def get_local_bbox(el):
         return None
 
 
-def restyle_sp_or_cxn(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, is_heading_shape=False, font_scale=1.0):
+def restyle_sp_or_cxn(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, is_heading_shape=False, font_scale=1.0, header_size_mode=None):
     """Restyles a <p:sp> or <p:cxnSp> (fills, gradients, borders, style refs, and text runs)."""
     tag = el.tag.split("}")[-1]
     sp_pr = el.find(qn_p("spPr"))
@@ -1189,6 +1507,10 @@ def restyle_sp_or_cxn(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, is_
         solid_fill = sp_pr.find(qn_a("solidFill"))
         grad_fill = sp_pr.find(qn_a("gradFill"))
         blip_fill = sp_pr.find(qn_a("blipFill"))
+
+        if no_fill is not None and (solid_fill is not None or grad_fill is not None or blip_fill is not None):
+            sp_pr.remove(no_fill)
+            no_fill = None
 
         if no_fill is not None:
             effective_bg_lum = underlying_lum
@@ -1276,7 +1598,8 @@ def restyle_sp_or_cxn(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, is_
             bg_lum=effective_bg_lum,
             is_heading_shape=is_heading_shape,
             style_font_rgb=style_font_rgb,
-            font_scale=font_scale
+            font_scale=font_scale,
+            header_size_mode=header_size_mode
         )
 
     if has_opaque_fill and bbox is not None:
@@ -1328,11 +1651,11 @@ def restyle_table_element(tbl_el, theme_map, mapper, font_scale=1.0):
             )
 
 
-def restyle_any_element(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, is_heading_shape=False, font_scale=1.0):
+def restyle_any_element(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, is_heading_shape=False, font_scale=1.0, header_size_mode=None):
     """Dispatches deep color & font restyling across shapes, connectors, pictures, groups, and tables."""
     tag = el.tag.split("}")[-1]
     if tag in ("sp", "cxnSp"):
-        restyle_sp_or_cxn(el, theme_map, mapper, z_bg_stack, default_bg_lum, is_heading_shape, font_scale)
+        restyle_sp_or_cxn(el, theme_map, mapper, z_bg_stack, default_bg_lum, is_heading_shape, font_scale, header_size_mode=header_size_mode)
     elif tag == "pic":
         sp_pr = el.find(qn_p("spPr"))
         if sp_pr is not None:
@@ -1595,13 +1918,15 @@ def sanitize_pptx_package(buf, slide_count):
     keep = [n for n in deduped_names if n not in drop]
     keep_set = set(keep)
 
+    notes_count = sum(1 for n in keep if n.startswith("ppt/notesSlides/notesSlide") and n.endswith(".xml"))
+
     app_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
         '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
         'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
         '<TotalTime>0</TotalTime><Application>Microsoft Office PowerPoint</Application>'
         '<PresentationFormat>Breitbild</PresentationFormat>'
-        f'<Slides>{slide_count}</Slides><Notes>0</Notes><HiddenSlides>0</HiddenSlides><MMClips>0</MMClips>'
+        f'<Slides>{slide_count}</Slides><Notes>{notes_count}</Notes><HiddenSlides>0</HiddenSlides><MMClips>0</MMClips>'
         '<ScaleCrop>false</ScaleCrop><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc>'
         '<HyperlinksChanged>false</HyperlinksChanged><AppVersion>16.0000</AppVersion></Properties>'
     )
@@ -1651,29 +1976,52 @@ def sanitize_pptx_package(buf, slide_count):
 
 # ----------------- 6. 1:1 EXACT-LAYOUT CORPORATE TRANSFORMATION ENGINE -----------------
 
-def detect_slide_heading_shape(shapes):
+def detect_slide_heading_shape(shapes, exclude_shapes=None, old_w=None, old_h=None):
     """Finds the primary top heading/title shape on a slide (if any) without altering layout."""
     best = None
     best_score = -999
+    excl = exclude_shapes or set()
+    ref_h = float(old_h) if old_h else (7.5 * 914400.0)
+    ref_w = float(old_w) if old_w else (13.333 * 914400.0)
+
     for sh in shapes:
-        if should_skip_source_shape(sh):
+        if sh in excl or should_skip_source_shape(sh):
             continue
         if not (getattr(sh, "has_text_frame", False) and sh.text_frame and sh.text_frame.text.strip()):
             continue
         txt = sh.text_frame.text.strip()
         if len(txt) > 180:
             continue
-        top_in = (sh.top or 0) / 914400.0
-        left_in = (sh.left or 0) / 914400.0
+
+        is_title_ph = False
+        ph_idx = None
+        if sh.is_placeholder:
+            try:
+                ph_idx = sh.placeholder_format.idx
+                if sh.placeholder_format.type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE) or ph_idx == 10:
+                    is_title_ph = True
+            except Exception:
+                pass
+
+        # Skip Vorlage top-strip Kapitel placeholder (idx=12 at y < 0.65") when searching for main Title
+        if ph_idx == 12 and (sh.top or 0) < int(0.65 * 914400):
+            continue
+
+        # Skip tall multi-paragraph body/quote boxes that merely start near the top
+        if not is_title_ph and (sh.height or 0) > 0.28 * ref_h:
+            continue
+
+        rel_top = (sh.top or 0) / ref_h
+        rel_left = (sh.left or 0) / ref_w
         score = 0
-        if top_in < 1.15:
+        if rel_top < 0.16:
             score += 45
-        elif top_in < 2.2:
+        elif rel_top < 0.30:
             score += 15
         else:
             score -= 25
 
-        if left_in < 2.0:
+        if rel_left < 0.20:
             score += 10
         if len(txt) < 90:
             score += 20
@@ -1686,12 +2034,8 @@ def detect_slide_heading_shape(shapes):
         if max_pt >= 20:
             score += 25
 
-        if sh.is_placeholder:
-            try:
-                if sh.placeholder_format.type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE):
-                    score += 50
-            except Exception:
-                pass
+        if is_title_ph:
+            score += 50
 
         if score > best_score and score >= 25:
             best_score = score
@@ -1699,25 +2043,1312 @@ def detect_slide_heading_shape(shapes):
     return best
 
 
+def collect_repeated_header_kickers(user_prs, old_w, old_h):
+    """
+    Pre-scans content slides to identify repeating first-line kicker/chapter strings
+    inside 2-line top header boxes (e.g., 'Arbeitssystemanalyse [ASystA]' across slides).
+    """
+    counts = Counter()
+    for s_idx, slide in enumerate(user_prs.slides):
+        if s_idx == 0:
+            continue
+        for sh in slide.shapes:
+            if should_skip_source_shape(sh):
+                continue
+            if not (getattr(sh, "has_text_frame", False) and sh.text_frame):
+                continue
+            if (sh.top or 0) / old_h > 0.18 or (sh.left or 0) / old_w > 0.35:
+                continue
+            paras = [" ".join(p.text.split()) for p in sh.text_frame.paragraphs if p.text and p.text.strip()]
+            if len(paras) >= 2 and 2 <= len(paras[0]) <= 85:
+                counts[paras[0].lower()] += 1
+    return {k for k, cnt in counts.items() if cnt >= 2}
+
+
+def extract_slide_header_components(old_slide, source_shapes, old_w, old_h, repeated_first_lines):
+    """
+    Identifies top-bar 'Kapitel' (12pt) and 'Titel' (28pt) components on a content slide:
+    Returns dict with:
+      - use_vorlage_header: bool (True when slide uses standard top header zone)
+      - kapitel_sh: shape consumed as Kapitel (or None)
+      - top_title_sh: shape consumed as Titel (or None)
+      - heading_sh: general heading shape on slide (may be middle section divider or banner)
+      - kapitel_lines: list[str]
+      - title_lines: list[str]
+      - subtitle_lines: list[str]
+    """
+    kapitel_sh = None
+    # 1. Detect dedicated Kapitel shape (idx=12 at top, or small kicker box above title)
+    potential_other_top_titles = []
+    for sh in source_shapes:
+        if should_skip_source_shape(sh):
+            continue
+        if not (getattr(sh, "has_text_frame", False) and sh.text_frame and sh.text_frame.text.strip()):
+            continue
+        if (sh.top or 0) / old_h <= 0.18 and (sh.left or 0) / old_w <= 0.38:
+            potential_other_top_titles.append(sh)
+
+    for sh in potential_other_top_titles:
+        if sh._element.tag.split("}")[-1] != "sp":
+            continue
+        ph_idx = None
+        if sh.is_placeholder:
+            try:
+                ph_idx = sh.placeholder_format.idx
+            except Exception:
+                pass
+        rel_top = (sh.top or 0) / old_h
+        rel_left = (sh.left or 0) / old_w
+        raw_txt = " ".join(sh.text_frame.text.split())
+
+        # Explicit Vorlage Kapitel placeholder (idx=12 in top strip y <= 0.64")
+        if ph_idx == 12 and rel_top <= 0.085:
+            kapitel_sh = sh
+            break
+
+        # Non-title small kicker box at very top-left above a lower title or at y <= 0.31"
+        if ph_idx != 10 and rel_top <= 0.065 and rel_left <= 0.20 and not shape_has_visual_fill(sh._element):
+            non_empty_p = [p for p in sh.text_frame.paragraphs if p.text and p.text.strip()]
+            max_sz = get_shape_max_font_sz(sh, old_slide)
+            has_lower_title = any(
+                other is not sh
+                and (other.top or 0) > (sh.top or 0) + int(0.10 * 914400)
+                and len(other.text_frame.text.strip()) <= 160
+                for other in potential_other_top_titles
+            )
+            if len(raw_txt) <= 110 and len(non_empty_p) <= 2 and (max_sz == 0 or max_sz <= 1700):
+                if has_lower_title or (rel_top <= 0.042 and 0 < max_sz <= 1600):
+                    kapitel_sh = sh
+                    break
+
+    excl = {kapitel_sh} if kapitel_sh is not None else set()
+    heading_sh = detect_slide_heading_shape(source_shapes, exclude_shapes=excl, old_w=old_w, old_h=old_h)
+
+    top_title_sh = None
+    if heading_sh is not None and heading_sh._element.tag.split("}")[-1] == "sp":
+        rel_top = (heading_sh.top or 0) / old_h
+        rel_left = (heading_sh.left or 0) / old_w
+        rel_h = (heading_sh.height or 0) / old_h
+        is_title_ph = False
+        if heading_sh.is_placeholder:
+            try:
+                pht = heading_sh.placeholder_format.type
+                phi = heading_sh.placeholder_format.idx
+                is_title_ph = pht in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE) or phi == 10
+            except Exception:
+                pass
+
+        has_bullets = any(
+            heading_sh._element.find(f".//{{{A_NS}}}{bt}") is not None
+            for bt in ("buChar", "buAutoNum", "buBlip")
+        )
+        non_empty_p = [p for p in heading_sh.text_frame.paragraphs if p.text and p.text.strip()]
+
+        if (
+            rel_top <= 0.18
+            and rel_left <= 0.38
+            and not shape_has_visual_fill(heading_sh._element)
+            and (is_title_ph or (rel_h <= 0.26 and len(non_empty_p) <= 3 and not has_bullets))
+        ):
+            top_title_sh = heading_sh
+
+    kapitel_lines = []
+    title_lines = []
+    subtitle_lines = []
+
+    if kapitel_sh is not None:
+        for p in kapitel_sh.text_frame.paragraphs:
+            for ln in p.text.splitlines():
+                cleaned = " ".join(ln.split())
+                if cleaned and cleaned.lower() != "kapitel":
+                    kapitel_lines.append(cleaned)
+
+    if top_title_sh is not None:
+        tmap = extract_slide_theme_map(old_slide)
+        txbody = top_title_sh._element.find(qn_p("txBody"))
+        lst = txbody.find(qn_a("lstStyle")) if txbody is not None else None
+        lvl_sz = {}
+        lvl_b = {}
+        lvl_rgb = {}
+        if top_title_sh.is_placeholder:
+            try:
+                inh_els = find_inherited_placeholder(
+                    old_slide,
+                    top_title_sh.placeholder_format.idx,
+                    top_title_sh.placeholder_format.type,
+                )
+                inh_props = extract_inherited_level_props(inh_els, is_title_ph=True)
+                for l_i, d in inh_props.items():
+                    if d.get("sz"):
+                        lvl_sz[l_i] = int(d["sz"])
+                    if d.get("b"):
+                        lvl_b[l_i] = d["b"]
+            except Exception:
+                pass
+        if lst is not None:
+            for l_i in range(9):
+                lp = lst.find(qn_a(f"lvl{l_i + 1}pPr"))
+                if lp is not None:
+                    dr = lp.find(qn_a("defRPr"))
+                    if dr is not None:
+                        if dr.get("sz"):
+                            try:
+                                lvl_sz[l_i] = int(dr.get("sz"))
+                            except ValueError:
+                                pass
+                        if dr.get("b"):
+                            lvl_b[l_i] = dr.get("b")
+                        res = resolve_color_from_parent(dr.find(qn_a("solidFill")), tmap)
+                        if res is not None:
+                            lvl_rgb[l_i] = res[0]
+
+        para_meta = []
+        if txbody is not None:
+            for p_el in txbody.findall(qn_a("p")):
+                ppr = p_el.find(qn_a("pPr"))
+                lvl = int(ppr.get("lvl", "0")) if (ppr is not None and ppr.get("lvl", "0").isdigit()) else 0
+                eff_sz = lvl_sz.get(lvl, 0)
+                eff_b = lvl_b.get(lvl, "0")
+                eff_rgb = lvl_rgb.get(lvl, tmap.get("tx1", (0, 0, 0)))
+
+                runs = p_el.findall(qn_a("r"))
+                run_szs = []
+                for r_el in runs:
+                    rpr = r_el.find(qn_a("rPr"))
+                    if rpr is not None:
+                        if rpr.get("sz"):
+                            try:
+                                run_szs.append(int(rpr.get("sz")))
+                            except ValueError:
+                                pass
+                        if rpr.get("b") is not None:
+                            eff_b = rpr.get("b")
+                        res = resolve_color_from_parent(rpr.find(qn_a("solidFill")), tmap)
+                        if res is not None:
+                            eff_rgb = res[0]
+                if run_szs:
+                    eff_sz = max(run_szs)
+
+                # Split explicit <a:br/> line breaks cleanly inside the paragraph
+                chunks = [[]]
+                for ch in p_el:
+                    ctag = ch.tag.split("}")[-1]
+                    if ctag == "r":
+                        t_node = ch.find(qn_a("t"))
+                        if t_node is not None and t_node.text:
+                            chunks[-1].append(t_node.text)
+                    elif ctag == "br":
+                        chunks.append([])
+                joined_chunks = [" ".join("".join(c).split()) for c in chunks if "".join(c).strip()]
+                if joined_chunks:
+                    para_meta.append((" |BR| ".join(joined_chunks), joined_chunks, eff_sz, eff_b, eff_rgb))
+
+        if len(para_meta) == 1:
+            title_lines.extend(para_meta[0][1])
+        elif len(para_meta) == 2 and not kapitel_lines:
+            (_, ch0, sz0, b0, rgb0), (_, ch1, sz1, b1, rgb1) = para_meta
+            t0 = " ".join(ch0)
+            t1 = " ".join(ch1)
+            is_kicker_first = (
+                len(ch0) == 1
+                and len(t0) <= 85
+                and (
+                    (t0.lower() in repeated_first_lines)
+                    or (sz0 > 0 and sz1 > 0 and sz0 < sz1)
+                )
+            )
+            if is_kicker_first:
+                if t0.lower() != "kapitel":
+                    kapitel_lines.append(t0)
+                title_lines.extend(ch1)
+            elif len(t0) + len(t1) <= 68 and len(ch0) == 1 and len(ch1) == 1:
+                sep = " " if t0.endswith((":", "–", "-", "?", "!")) else " – "
+                title_lines.append(f"{t0}{sep}{t1}")
+            else:
+                title_lines.extend(ch0)
+                title_lines.extend(ch1)
+        elif len(para_meta) >= 2:
+            if not kapitel_lines:
+                first_t = " ".join(para_meta[0][1])
+                if len(para_meta[0][1]) == 1 and (
+                    first_t.lower() in repeated_first_lines
+                    or (0 < para_meta[0][2] < para_meta[1][2])
+                ):
+                    if first_t.lower() != "kapitel":
+                        kapitel_lines.append(first_t)
+                    for pm in para_meta[1:]:
+                        title_lines.extend(pm[1])
+                else:
+                    for pm in para_meta:
+                        title_lines.extend(pm[1])
+            else:
+                for pm in para_meta:
+                    title_lines.extend(pm[1])
+
+    use_vorlage_header = bool(title_lines or kapitel_lines or subtitle_lines)
+    return {
+        "use_vorlage_header": use_vorlage_header,
+        "kapitel_sh": kapitel_sh,
+        "top_title_sh": top_title_sh,
+        "heading_sh": heading_sh,
+        "kapitel_lines": kapitel_lines,
+        "title_lines": title_lines,
+        "subtitle_lines": subtitle_lines,
+    }
+
+
+def is_url_only_text(txt):
+    t = (txt or "").strip().lower()
+    if not t or " " in t or "\n" in t:
+        return False
+    return t.startswith("www.") or t.startswith("http://") or t.startswith("https://") or t.endswith(".de") or t.endswith(".com")
+
+
+def get_shape_max_font_sz(sh, old_slide):
+    """Returns effective maximum font size in hundredths of a point (e.g. 3600 = 36pt)."""
+    max_sz = 0
+    el = sh._element
+    for rpr in el.findall(f".//{{{A_NS}}}rPr") + el.findall(f".//{{{A_NS}}}defRPr"):
+        if rpr.get("sz"):
+            try:
+                max_sz = max(max_sz, int(rpr.get("sz")))
+            except ValueError:
+                pass
+    if max_sz == 0 and sh.is_placeholder:
+        ph_idx = None
+        ph_type = None
+        is_title_ph = False
+        try:
+            ph_idx = sh.placeholder_format.idx
+            ph_type = sh.placeholder_format.type
+            is_title_ph = ph_type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE) or ph_idx == 10
+        except Exception:
+            pass
+        inh_els = find_inherited_placeholder(old_slide, ph_idx, ph_type)
+        lvl_props = extract_inherited_level_props(inh_els, is_title_ph=is_title_ph)
+        if lvl_props.get(0, {}).get("sz"):
+            try:
+                max_sz = int(lvl_props[0]["sz"])
+            except ValueError:
+                pass
+        elif is_title_ph:
+            max_sz = 3200
+    return max_sz
+
+
+def is_cover_slide_candidate(first_slide):
+    """
+    Returns True when Slide 1 represents a presentation cover/title slide
+    (no tables, charts, or SmartArt diagrams, and concise title/subtitle text).
+    """
+    root = first_slide._element
+    if root.find(f".//{{{A_NS}}}tbl") is not None:
+        return False
+    for gd in root.findall(f".//{{{A_NS}}}graphicData"):
+        uri = (gd.get("uri") or "").lower()
+        if "/chart" in uri or "/diagram" in uri:
+            return False
+
+    non_url_chars = 0
+    for sh in first_slide.shapes:
+        if should_skip_source_shape(sh):
+            continue
+        if getattr(sh, "has_text_frame", False) and sh.text_frame:
+            txt = sh.text_frame.text.strip()
+            if txt and not is_url_only_text(txt):
+                non_url_chars += len(txt)
+
+    return 1 <= non_url_chars <= 420
+
+
+def extract_cover_title_lines(first_slide):
+    """
+    Extracts (primary_lines, subtitle_lines) from Slide 1 of the source presentation.
+    """
+    candidates = []
+    for sh in first_slide.shapes:
+        if should_skip_source_shape(sh):
+            continue
+        if not (getattr(sh, "has_text_frame", False) and sh.text_frame):
+            continue
+        raw_txt = sh.text_frame.text.strip()
+        if not raw_txt or is_url_only_text(raw_txt):
+            continue
+
+        ph_idx = None
+        ph_type = None
+        if sh.is_placeholder:
+            try:
+                ph_idx = sh.placeholder_format.idx
+                ph_type = sh.placeholder_format.type
+            except Exception:
+                pass
+
+        max_sz = get_shape_max_font_sz(sh, first_slide)
+        score = max_sz / 50.0  # e.g. 3600 -> +72
+
+        if ph_idx == 10 or ph_type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE):
+            score += 120
+        elif ph_type == PP_PLACEHOLDER.SUBTITLE:
+            score -= 20
+        elif ph_idx == 11:
+            score -= 40
+
+        if len(raw_txt) <= 140:
+            score += 25
+        top_in = (sh.top or 0) / 914400.0
+        if top_in < 5.0:
+            score += 15
+
+        candidates.append((score, sh, ph_idx, ph_type, max_sz))
+
+    if not candidates:
+        return (["Präsentation"], [])
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    _, main_sh, _, _, main_max_sz = candidates[0]
+
+    para_items = []
+    for p in main_sh.text_frame.paragraphs:
+        t = " ".join(p.text.split())
+        if not t:
+            continue
+        p_sz = 0
+        for r in p.runs:
+            if r.font.size:
+                p_sz = max(p_sz, int(round(r.font.size.pt * 100)))
+        if p_sz == 0:
+            p_sz = main_max_sz
+        para_items.append((t, p_sz))
+
+    top_p_sz = max((sz for _, sz in para_items), default=0)
+    primary_lines = []
+    subtitle_lines = []
+    for t, sz in para_items:
+        if primary_lines and top_p_sz > 0 and sz > 0 and (top_p_sz - sz) >= 400:
+            subtitle_lines.append(t)
+        else:
+            primary_lines.append(t)
+
+    # Check if there is a separate subtitle shape on Slide 1
+    if not subtitle_lines and len(candidates) > 1:
+        for _, sub_sh, sub_idx, sub_type, _ in candidates[1:]:
+            if sub_idx == 11:
+                continue
+            sub_paras = [" ".join(p.text.split()) for p in sub_sh.text_frame.paragraphs if p.text.strip()]
+            joined = " ".join(sub_paras)
+            if not sub_paras or is_url_only_text(joined):
+                continue
+            if sub_type == PP_PLACEHOLDER.SUBTITLE or (len(joined) <= 100 and len(sub_paras) <= 2):
+                subtitle_lines.extend(sub_paras)
+                break
+
+    if not primary_lines:
+        primary_lines = [" ".join(main_sh.text_frame.text.split())]
+
+    return (primary_lines, subtitle_lines)
+
+
+def populate_vorlage_cover_slide(cover_slide, primary_lines, subtitle_lines):
+    """
+    Writes the presentation title (and optional subtitle) onto the official Vorlage
+    Cover Slide ('Kapitel mit großem Bild') in pure White (#FFFFFF) Abadi font.
+    """
+    title_sp = None
+    url_sp = None
+    for el in cover_slide.shapes._spTree.findall(qn_p("sp")):
+        ph = el.find(f".//{{{P_NS}}}ph")
+        if ph is not None:
+            idx_str = ph.get("idx")
+            ptype = ph.get("type", "")
+            if idx_str == "10" or ptype in ("title", "ctrTitle"):
+                if title_sp is None or idx_str == "10":
+                    title_sp = el
+            elif idx_str == "11":
+                url_sp = el
+
+    # Fallback if custom template cover had no idx=10 placeholder
+    if title_sp is None:
+        tb = cover_slide.shapes.add_textbox(690605, 3242373, 4950000, 1780000)
+        title_sp = tb._element
+    else:
+        ensure_explicit_xfrm(title_sp, 690605, 3242373, 4950000, 1780000)
+
+    main_chars = sum(len(x) for x in primary_lines)
+    if main_chars <= 32 and len(primary_lines) <= 2 and not subtitle_lines:
+        main_sz = 3600
+    elif main_chars <= 55:
+        main_sz = 3000 if not subtitle_lines else 2800
+    elif main_chars <= 90:
+        main_sz = 2600
+    else:
+        main_sz = 2200
+    sub_sz = max(1800, main_sz - 600)
+
+    txbody = title_sp.find(qn_p("txBody"))
+    if txbody is None:
+        txbody = etree.SubElement(title_sp, qn_p("txBody"))
+
+    body_pr = txbody.find(qn_a("bodyPr"))
+    if body_pr is None:
+        body_pr = etree.Element(qn_a("bodyPr"))
+        txbody.insert(0, body_pr)
+    body_pr.attrib.clear()
+    body_pr.set("wrap", "square")
+    body_pr.set("lIns", "0")
+    body_pr.set("rIns", "0")
+    body_pr.set("tIns", "0")
+    body_pr.set("bIns", "0")
+    body_pr.set("anchor", "t")
+    for ch in list(body_pr):
+        body_pr.remove(ch)
+    etree.SubElement(body_pr, qn_a("noAutofit"))
+
+    if txbody.find(qn_a("lstStyle")) is None:
+        txbody.insert(1, etree.Element(qn_a("lstStyle")))
+
+    for old_p in list(txbody.findall(qn_a("p"))):
+        txbody.remove(old_p)
+
+    def _append_white_para(text_str, sz_val, space_before_pts=0):
+        p = etree.SubElement(txbody, qn_a("p"))
+        ppr = etree.SubElement(p, qn_a("pPr"))
+        ppr.set("marL", "0")
+        ppr.set("lvl", "0")
+        ppr.set("indent", "0")
+        ppr.set("algn", "l")
+        ln_spc = etree.SubElement(ppr, qn_a("lnSpc"))
+        spc_pct = etree.SubElement(ln_spc, qn_a("spcPct"))
+        spc_pct.set("val", "105000")
+        if space_before_pts > 0:
+            sb = etree.SubElement(ppr, qn_a("spcBef"))
+            sp = etree.SubElement(sb, qn_a("spcPts"))
+            sp.set("val", str(space_before_pts))
+        etree.SubElement(ppr, qn_a("buNone"))
+
+        r = etree.SubElement(p, qn_a("r"))
+        rpr = etree.SubElement(r, qn_a("rPr"))
+        rpr.set("lang", "de-DE")
+        rpr.set("sz", str(sz_val))
+        rpr.set("b", "0")
+        rpr.set("dirty", "0")
+        sf = etree.SubElement(rpr, qn_a("solidFill"))
+        write_srgb_into_parent(sf, IFG_WHITE)
+        for ftag in ("latin", "ea", "cs"):
+            fe = etree.SubElement(rpr, qn_a(ftag))
+            fe.set("typeface", CORPORATE_FONT)
+
+        t_el = etree.SubElement(r, qn_a("t"))
+        t_el.text = text_str
+
+        ep = etree.SubElement(p, qn_a("endParaRPr"))
+        ep.set("lang", "de-DE")
+        ep.set("sz", str(sz_val))
+        ep.set("dirty", "0")
+        esf = etree.SubElement(ep, qn_a("solidFill"))
+        write_srgb_into_parent(esf, IFG_WHITE)
+        elat = etree.SubElement(ep, qn_a("latin"))
+        elat.set("typeface", CORPORATE_FONT)
+
+    for line in primary_lines:
+        _append_white_para(line, main_sz, space_before_pts=0)
+
+    for s_idx, s_line in enumerate(subtitle_lines):
+        _append_white_para(s_line, sub_sz, space_before_pts=(800 if s_idx == 0 else 200))
+
+    # Ensure bottom domain placeholder (www.gesundheitsmanagement.com) is also crisp White Abadi
+    if url_sp is not None:
+        url_tx = url_sp.find(qn_p("txBody"))
+        if url_tx is not None:
+            for r in url_tx.findall(f".//{{{A_NS}}}r"):
+                rpr = r.find(qn_a("rPr"))
+                if rpr is None:
+                    rpr = etree.Element(qn_a("rPr"))
+                    r.insert(0, rpr)
+                for ftag in ("noFill", "solidFill", "gradFill", "pattFill"):
+                    old_f = rpr.find(qn_a(ftag))
+                    if old_f is not None:
+                        rpr.remove(old_f)
+                sf = etree.Element(qn_a("solidFill"))
+                write_srgb_into_parent(sf, IFG_WHITE)
+                rpr.insert(0, sf)
+                apply_corporate_font_to_rpr(rpr)
+
+    # Guarantee unique <p:cNvPr id="..."> across the entire cover slide XML (fixes native think-cell duplicate IDs)
+    for idx_id, cnv in enumerate(cover_slide._element.iter(qn_p("cNvPr")), start=1):
+        cnv.set("id", str(idx_id))
+
+
+def create_white_logo_variant(png_blob):
+    """Generates a white-on-transparent variant of the 'a.' corner logo while keeping the cyan bar intact."""
+    try:
+        img = Image.open(io.BytesIO(png_blob)).convert("RGBA")
+        px = img.load()
+        w, h = img.size
+        for y in range(h):
+            for x in range(w):
+                r, g, b, a = px[x, y]
+                if a > 15:
+                    # Keep cyan bar pixels (high green/blue relative to red), turn dark navy 'a.' to crisp white
+                    if perceived_brightness((r, g, b)) < 0.35 and not (g > r + 40 and b > r + 40):
+                        px[x, y] = (255, 255, 255, a)
+        out = io.BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return png_blob
+
+
+def create_cyan_bg_logo_variant(png_blob):
+    """Keeps Dark Navy 'a.' and turns the bottom cyan underline bar to crisp White so both pop on cyan sidebars."""
+    try:
+        img = Image.open(io.BytesIO(png_blob)).convert("RGBA")
+        px = img.load()
+        w, h = img.size
+        for y in range(h):
+            for x in range(w):
+                r, g, b, a = px[x, y]
+                if a > 15 and g > r + 35 and b > r + 35:
+                    px[x, y] = (255, 255, 255, a)
+        out = io.BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue()
+    except Exception:
+        return png_blob
+
+
+def extract_vorlage_brand_assets(output_prs):
+    """
+    Extracts the official top-right 'a.' corner logo (dark-navy, cyan-bg, and white variants),
+    bottom-right slide number coordinates, and theme heading/body font references from the Vorlage.
+    """
+    assets = {
+        "dark_logo_blob": None,
+        "dark_logo_box": (11089638, 406399, 733425, 733425),
+        "cyan_logo_blob": None,
+        "light_logo_blob": None,
+        "light_logo_box": (11089638, 406399, 733425, 733425),
+        "snum_box": (11101546, 6299200, 743702, 365125),
+        "heading_typeface": CORPORATE_FONT,
+        "body_typeface": CORPORATE_FONT,
+    }
+    try:
+        master = output_prs.slide_masters[0]
+        # Check if Vorlage theme1.xml defines Abadi as majorFont (+mj-lt -> 'Abadi (Überschriften)') & minorFont (+mn-lt)
+        for rel in master.part.rels.values():
+            if not rel.is_external and rel.reltype.endswith("/theme"):
+                t_root = etree.fromstring(rel.target_part.blob)
+                maj_lat = t_root.find(f".//{{{A_NS}}}fontScheme/{{{A_NS}}}majorFont/{{{A_NS}}}latin")
+                min_lat = t_root.find(f".//{{{A_NS}}}fontScheme/{{{A_NS}}}minorFont/{{{A_NS}}}latin")
+                if maj_lat is not None and (maj_lat.get("typeface") or "").strip().lower() == CORPORATE_FONT.lower():
+                    assets["heading_typeface"] = "+mj-lt"
+                if min_lat is not None and (min_lat.get("typeface") or "").strip().lower() == CORPORATE_FONT.lower():
+                    assets["body_typeface"] = "+mn-lt"
+                break
+
+        for el in master._element.findall(f".//{{{P_NS}}}spTree/*"):
+            tag = el.tag.split("}")[-1]
+            bbox = get_local_bbox(el)
+            if bbox is None:
+                continue
+            x1, y1, x2, y2 = bbox
+            if tag == "pic" and x1 >= int(9.5 * 914400) and y1 <= int(1.5 * 914400):
+                blip = el.find(f".//{{{A_NS}}}blip")
+                rid = blip.get(f"{{{R_NS}}}embed") if blip is not None else None
+                if rid and rid in master.part.rels and not master.part.rels[rid].is_external:
+                    assets["dark_logo_blob"] = master.part.rels[rid].target_part.blob
+                    assets["dark_logo_box"] = (x1, y1, x2 - x1, y2 - y1)
+            elif tag == "sp":
+                ph = el.find(f".//{{{P_NS}}}ph")
+                if ph is not None and ph.get("type") == "sldNum":
+                    assets["snum_box"] = (x1, y1, x2 - x1, y2 - y1)
+
+        # Look for official white corner logo variant in dark layouts (e.g. slideLayout17 -> image5.png)
+        for lay in output_prs.slide_layouts:
+            for el in lay._element.findall(f".//{{{P_NS}}}spTree/{{{P_NS}}}pic"):
+                bbox = get_local_bbox(el)
+                if bbox is None:
+                    continue
+                x1, y1, x2, y2 = bbox
+                if x1 >= int(9.5 * 914400) and y1 <= int(1.5 * 914400):
+                    blip = el.find(f".//{{{A_NS}}}blip")
+                    rid = blip.get(f"{{{R_NS}}}embed") if blip is not None else None
+                    if rid and rid in lay.part.rels and not lay.part.rels[rid].is_external:
+                        cand_blob = lay.part.rels[rid].target_part.blob
+                        if assets["dark_logo_blob"] is None or cand_blob != assets["dark_logo_blob"]:
+                            assets["light_logo_blob"] = cand_blob
+                            assets["light_logo_box"] = (x1, y1, x2 - x1, y2 - y1)
+                            break
+            if assets["light_logo_blob"] is not None:
+                break
+
+        if assets["dark_logo_blob"] is not None:
+            assets["cyan_logo_blob"] = create_cyan_bg_logo_variant(assets["dark_logo_blob"])
+        if assets["light_logo_blob"] is None and assets["dark_logo_blob"] is not None:
+            assets["light_logo_blob"] = create_white_logo_variant(assets["dark_logo_blob"])
+            assets["light_logo_box"] = assets["dark_logo_box"]
+    except Exception:
+        pass
+    return assets
+
+
+def populate_vorlage_content_header(
+    new_slide,
+    ph_titel_el,
+    ph_kapitel_el,
+    title_lines,
+    kapitel_lines,
+    subtitle_lines,
+    z_bg_stack,
+    slide_bg_lum,
+    brand_assets,
+):
+    """
+    Populates the official Vorlage 'Leere Folie' header placeholders on content slides:
+      - Kapitel (idx=12 at x=0.47", y=0.23"): Abadi, size 12 pt (sz='1200'), muted gray (#808080) or white on dark bg
+      - Titel   (idx=10 at x=0.47", y=0.50"): Abadi (Überschriften), size 28 pt (sz='2800'), IfG Navy (#012641) or white on dark bg
+    Automatically narrows header width before any right-side sidebar/split image and prevents overlap with body content.
+    """
+    hdr_x = 431799
+    kap_y = 208228
+    kap_cy = 307777
+    tit_y = 455313
+    default_cx = 9441249  # 10.325" (ends at 10.80", safely clear of 12.13" 'a.' logo)
+    max_x2 = hdr_x + default_cx
+
+    # Check if a right-side colored sidebar or full-height split image starts before 10.80"
+    sp_tree = new_slide.shapes._spTree
+    top_backdrop_idx = -1
+    for tree_i, el in enumerate(list(sp_tree)):
+        if el is ph_titel_el or el is ph_kapitel_el:
+            continue
+        tag = el.tag.split("}")[-1]
+        if tag not in ("sp", "pic", "grpSp", "graphicFrame"):
+            continue
+        bbox = get_local_bbox(el)
+        if bbox is None:
+            continue
+        bx1, by1, bx2, by2 = bbox
+        bw, bh = bx2 - bx1, by2 - by1
+        is_right_split = (
+            bx1 >= int(4.5 * 914400)
+            and by1 <= int(1.10 * 914400)
+            and bh >= int(2.4 * 914400)
+            and ((tag == "sp" and shape_has_visual_fill(el)) or (tag == "pic" and by2 >= int(6.5 * 914400)))
+        )
+        if is_right_split:
+            max_x2 = min(max_x2, bx1 - int(0.25 * 914400))
+
+        # Track top-covering full-width header banners so Kapitel/Titel sit above them in Z-order
+        if tag == "sp" and shape_has_visual_fill(el) and bx1 <= int(1.0 * 914400) and by1 <= int(0.65 * 914400) and bw >= int(5.0 * 914400):
+            top_backdrop_idx = max(top_backdrop_idx, tree_i)
+
+    header_cx = max(int(3.2 * 914400), max_x2 - hdr_x)
+    header_bg_lum = get_bg_lum_under_box((hdr_x, tit_y, hdr_x + min(header_cx, int(3.5 * 914400)), tit_y + 523220), z_bg_stack, slide_bg_lum)
+
+    titel_hex = IFG_WHITE if header_bg_lum < 0.48 else IFG_NAVY
+    kapitel_hex = IFG_WHITE if header_bg_lum < 0.48 else VORLAGE_KAPITEL_GRAY
+    heading_tf = brand_assets.get("heading_typeface", CORPORATE_FONT)
+    body_tf = brand_assets.get("body_typeface", CORPORATE_FONT)
+
+    # Estimate wrapped line count of Titel at 28pt (~0.148" per average character)
+    chars_per_line = max(18, int((header_cx / 914400.0) / 0.148))
+    est_lines = 0
+    for tl in title_lines:
+        est_lines += max(1, (len(tl) + chars_per_line - 1) // chars_per_line)
+    if subtitle_lines:
+        est_lines += len(subtitle_lines)
+    titel_cy = 523220 if est_lines <= 1 else int(round((0.46 * est_lines + 0.08) * 914400))
+
+    def _set_placeholder_xfrm(el, x, y, cx, cy, is_placeholder=True):
+        sp_pr = el.find(qn_p("spPr"))
+        if sp_pr is None:
+            sp_pr = etree.Element(qn_p("spPr"))
+            el.insert(1, sp_pr)
+        for ch in list(sp_pr):
+            if ch.tag.split("}")[-1] in ("xfrm", "solidFill", "gradFill", "blipFill", "pattFill", "noFill", "ln"):
+                sp_pr.remove(ch)
+        xfrm = etree.Element(qn_a("xfrm"))
+        off = etree.SubElement(xfrm, qn_a("off"))
+        off.set("x", str(int(round(x))))
+        off.set("y", str(int(round(y))))
+        ext = etree.SubElement(xfrm, qn_a("ext"))
+        ext.set("cx", str(max(0, int(round(cx)))))
+        ext.set("cy", str(max(0, int(round(cy)))))
+        sp_pr.insert(0, xfrm)
+        if not is_placeholder:
+            if sp_pr.find(qn_a("prstGeom")) is None:
+                prst = etree.Element(qn_a("prstGeom"))
+                prst.set("prst", "rect")
+                etree.SubElement(prst, qn_a("avLst"))
+                insert_sppr_child(sp_pr, prst, slot_rank=1)
+            insert_sppr_child(sp_pr, etree.Element(qn_a("noFill")), slot_rank=2)
+
+    def _populate_header_sp(sp_el, x, y, cx, cy, main_paras, sub_paras, main_sz, main_hex, main_tf, sub_sz, sub_hex, sub_tf, is_ph):
+        _set_placeholder_xfrm(sp_el, x, y, cx, cy, is_placeholder=is_ph)
+        txbody = sp_el.find(qn_p("txBody"))
+        if txbody is None:
+            txbody = etree.SubElement(sp_el, qn_p("txBody"))
+
+        body_pr = txbody.find(qn_a("bodyPr"))
+        if body_pr is None:
+            body_pr = etree.Element(qn_a("bodyPr"))
+            txbody.insert(0, body_pr)
+        body_pr.attrib.clear()
+        body_pr.set("wrap", "square")
+        body_pr.set("lIns", "0")
+        body_pr.set("rIns", "0")
+        body_pr.set("tIns", "0")
+        body_pr.set("bIns", "0")
+        body_pr.set("anchor", "t")
+        for ch in list(body_pr):
+            body_pr.remove(ch)
+        etree.SubElement(body_pr, qn_a("noAutofit"))
+
+        lst = txbody.find(qn_a("lstStyle"))
+        if lst is None:
+            lst = etree.Element(qn_a("lstStyle"))
+            txbody.insert(1, lst)
+        else:
+            for ch in list(lst):
+                lst.remove(ch)
+        for lvl_i in range(1, 6):
+            lp = etree.SubElement(lst, qn_a(f"lvl{lvl_i}pPr"))
+            lp.set("marL", "0")
+            lp.set("indent", "0")
+            lp.set("algn", "l")
+            etree.SubElement(lp, qn_a("buNone"))
+            dr = etree.SubElement(lp, qn_a("defRPr"))
+            dr.set("lang", "de-DE")
+            dr.set("sz", main_sz)
+            dr.set("b", "0")
+            dr.set("dirty", "0")
+            dsf = etree.SubElement(dr, qn_a("solidFill"))
+            write_srgb_into_parent(dsf, main_hex)
+            dlat = etree.SubElement(dr, qn_a("latin"))
+            dlat.set("typeface", main_tf)
+            dea = etree.SubElement(dr, qn_a("ea"))
+            dea.set("typeface", "+mn-ea")
+            dcs = etree.SubElement(dr, qn_a("cs"))
+            dcs.set("typeface", CORPORATE_FONT)
+
+        for old_p in list(txbody.findall(qn_a("p"))):
+            txbody.remove(old_p)
+
+        def _add_p(txt_val, sz_v, hex_v, tf_v, spc_bef_pts=0):
+            p = etree.SubElement(txbody, qn_a("p"))
+            ppr = etree.SubElement(p, qn_a("pPr"))
+            ppr.set("marL", "0")
+            ppr.set("indent", "0")
+            ppr.set("lvl", "0")
+            ppr.set("algn", "l")
+            if spc_bef_pts > 0:
+                sb = etree.SubElement(ppr, qn_a("spcBef"))
+                sp_pts = etree.SubElement(sb, qn_a("spcPts"))
+                sp_pts.set("val", str(spc_bef_pts))
+            etree.SubElement(ppr, qn_a("buNone"))
+
+            if txt_val is not None:
+                r = etree.SubElement(p, qn_a("r"))
+                rpr = etree.SubElement(r, qn_a("rPr"))
+                rpr.set("lang", "de-DE")
+                rpr.set("sz", sz_v)
+                rpr.set("b", "0")
+                rpr.set("dirty", "0")
+                sf = etree.SubElement(rpr, qn_a("solidFill"))
+                write_srgb_into_parent(sf, hex_v)
+                lat = etree.SubElement(rpr, qn_a("latin"))
+                lat.set("typeface", tf_v)
+                ea = etree.SubElement(rpr, qn_a("ea"))
+                ea.set("typeface", "+mn-ea")
+                cs = etree.SubElement(rpr, qn_a("cs"))
+                cs.set("typeface", CORPORATE_FONT)
+                t_el = etree.SubElement(r, qn_a("t"))
+                t_el.text = txt_val
+
+            ep = etree.SubElement(p, qn_a("endParaRPr"))
+            ep.set("lang", "de-DE")
+            ep.set("sz", sz_v)
+            ep.set("b", "0")
+            ep.set("dirty", "0")
+            esf = etree.SubElement(ep, qn_a("solidFill"))
+            write_srgb_into_parent(esf, hex_v)
+            elat = etree.SubElement(ep, qn_a("latin"))
+            elat.set("typeface", tf_v)
+
+        if main_paras:
+            for m_txt in main_paras:
+                _add_p(m_txt, main_sz, main_hex, main_tf)
+            for s_idx, s_txt in enumerate(sub_paras):
+                _add_p(s_txt, sub_sz, sub_hex, sub_tf, spc_bef_pts=(200 if s_idx == 0 else 0))
+        else:
+            # Empty native placeholder: shows 'Kapitel'/'Titel' prompt in Edit Mode at 12pt/28pt, hidden in Slide Show
+            _add_p(None, main_sz, main_hex, main_tf)
+
+    # Fallback textbox creation if custom template lacked idx=12 or idx=10 on Leere Folie
+    kap_is_ph = ph_kapitel_el is not None
+    if ph_kapitel_el is None and kapitel_lines:
+        ph_kapitel_el = new_slide.shapes.add_textbox(hdr_x, kap_y, header_cx, kap_cy)._element
+
+    tit_is_ph = ph_titel_el is not None
+    if ph_titel_el is None and (title_lines or subtitle_lines):
+        ph_titel_el = new_slide.shapes.add_textbox(hdr_x, tit_y, header_cx, titel_cy)._element
+
+    kap_joined = [" – ".join(kapitel_lines)] if kapitel_lines else []
+    if ph_kapitel_el is not None:
+        _populate_header_sp(
+            ph_kapitel_el, hdr_x, kap_y, header_cx, kap_cy,
+            kap_joined, [],
+            KAPITEL_FONT_SZ, kapitel_hex, body_tf,
+            KAPITEL_FONT_SZ, kapitel_hex, body_tf,
+            is_ph=kap_is_ph,
+        )
+
+    if ph_titel_el is not None:
+        _populate_header_sp(
+            ph_titel_el, hdr_x, tit_y, header_cx, titel_cy,
+            title_lines, subtitle_lines,
+            TITLE_FONT_SZ, titel_hex, heading_tf,
+            KAPITEL_FONT_SZ, kapitel_hex, body_tf,
+            is_ph=tit_is_ph,
+        )
+
+    # Ensure Kapitel & Titel sit cleanly in front of any background panels/rectangles so they are never obscured or hard to click
+    for hdr_el in (ph_kapitel_el, ph_titel_el):
+        if hdr_el is not None and hdr_el in sp_tree:
+            sp_tree.remove(hdr_el)
+            sp_tree.append(hdr_el)
+
+    # If a 2+ line 28pt Titel extends down to ~1.36", gently clear any colliding foreground element right below it
+    if est_lines >= 2 and title_lines:
+        safe_title_bottom = tit_y + titel_cy + int(0.06 * 914400)
+        for el in list(sp_tree):
+            if el is ph_titel_el or el is ph_kapitel_el:
+                continue
+            tag = el.tag.split("}")[-1]
+            if tag not in ("sp", "pic", "grpSp", "graphicFrame"):
+                continue
+            bbox = get_local_bbox(el)
+            if bbox is None:
+                continue
+            bx1, by1, bx2, by2 = bbox
+            bw, bh = bx2 - bx1, by2 - by1
+            if bh >= int(5.4 * 914400) or by1 < int(0.55 * 914400):
+                continue
+            if bx1 < hdr_x + header_cx and bx2 > hdr_x and by1 < safe_title_bottom:
+                dy_nudge = safe_title_bottom - by1
+                if by2 + dy_nudge <= int(7.18 * 914400):
+                    ensure_explicit_xfrm(el, bx1, by1 + dy_nudge, bw, bh)
+
+    return [el for el in (ph_kapitel_el, ph_titel_el) if el is not None]
+
+
+def sample_pic_region_lum(pic_el, slide, target_box):
+    """Samples average luminance of an embedded raster picture at target_box (tx1, ty1, tx2, ty2)."""
+    try:
+        pb = get_local_bbox(pic_el)
+        if pb is None:
+            return None
+        px1, py1, px2, py2 = pb
+        pw, ph = px2 - px1, py2 - py1
+        if pw <= 0 or ph <= 0:
+            return None
+        blip = pic_el.find(f".//{{{A_NS}}}blip")
+        rid = blip.get(f"{{{R_NS}}}embed") if blip is not None else None
+        if not rid or rid not in slide.part.rels or slide.part.rels[rid].is_external:
+            return None
+        img = Image.open(io.BytesIO(slide.part.rels[rid].target_part.blob)).convert("RGB")
+        iw, ih = img.size
+        u1 = max(0.0, min(1.0, (target_box[0] - px1) / pw))
+        v1 = max(0.0, min(1.0, (target_box[1] - py1) / ph))
+        u2 = max(0.0, min(1.0, (target_box[2] - px1) / pw))
+        v2 = max(0.0, min(1.0, (target_box[3] - py1) / ph))
+        if u2 <= u1 or v2 <= v1:
+            return None
+        crop = img.crop((int(u1 * iw), int(v1 * ih), max(int(u1 * iw) + 1, int(u2 * iw)), max(int(v1 * ih) + 1, int(v2 * ih))))
+        crop = crop.resize((16, 16))
+        pixels = list(crop.getdata())
+        return sum(perceived_brightness(rgb) for rgb in pixels) / len(pixels)
+    except Exception:
+        return None
+
+
+def append_front_slide_number(slide, snum_box, slide_num_int, text_hex):
+    """Appends a crisp Abadi slide-number field on top of any right-side background bar/photo."""
+    sx, sy, scx, scy = snum_box
+    tb = slide.shapes.add_textbox(int(sx), int(sy), int(scx), int(scy))
+    sp = tb._element
+    sp_pr = sp.find(qn_p("spPr"))
+    if sp_pr is not None and sp_pr.find(qn_a("noFill")) is None:
+        insert_sppr_child(sp_pr, etree.Element(qn_a("noFill")), slot_rank=2)
+
+    txbody = sp.find(qn_p("txBody"))
+    body_pr = txbody.find(qn_a("bodyPr"))
+    body_pr.attrib.clear()
+    body_pr.set("vert", "horz")
+    body_pr.set("lIns", "91440")
+    body_pr.set("tIns", "45720")
+    body_pr.set("rIns", "91440")
+    body_pr.set("bIns", "45720")
+    body_pr.set("rtlCol", "0")
+    body_pr.set("anchor", "b")
+
+    for old_p in list(txbody.findall(qn_a("p"))):
+        txbody.remove(old_p)
+
+    p = etree.SubElement(txbody, qn_a("p"))
+    ppr = etree.SubElement(p, qn_a("pPr"))
+    ppr.set("algn", "r")
+    etree.SubElement(ppr, qn_a("buNone"))
+
+    fld = etree.SubElement(p, qn_a("fld"))
+    fld.set("id", "{B6F15528-F159-4107-2D62-56D95E031A43}")
+    fld.set("type", "slidenum")
+    rpr = etree.SubElement(fld, qn_a("rPr"))
+    rpr.set("lang", "de-DE")
+    rpr.set("sz", "1000")
+    rpr.set("b", "0")
+    rpr.set("dirty", "0")
+    sf = etree.SubElement(rpr, qn_a("solidFill"))
+    write_srgb_into_parent(sf, text_hex)
+    lat = etree.SubElement(rpr, qn_a("latin"))
+    lat.set("typeface", CORPORATE_FONT)
+    t_el = etree.SubElement(fld, qn_a("t"))
+    t_el.text = str(slide_num_int)
+
+    ep = etree.SubElement(p, qn_a("endParaRPr"))
+    ep.set("lang", "de-DE")
+    ep.set("sz", "1000")
+    ep.set("dirty", "0")
+
+
+def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide_num_int, heading_elem=None, protected_elems=None):
+    """
+    Ensures harmonious coexistence of right-side colored bars, portraits/images, sidebar text,
+    the official top-right Vorlage 'a.' logo, and the bottom-right slide number:
+    1. Foreground content colliding with the top-right 'a.' logo (e.g. a row of portraits)
+       shifts cleanly below the logo as an aligned group without overlapping lower elements.
+    2. Text inside a right-side colored sidebar automatically centers within the open window
+       between top/bottom elements with balanced corporate margins.
+    3. Whenever a colored sidebar, banner, or full-bleed backdrop covers the SlideMaster's
+       corner logo or slide number, places the official 'a.' logo (dark or white for contrast)
+       and slide number cleanly on the frontmost Z-layer.
+    """
+    protected_set = set(protected_elems or ())
+    if heading_elem is not None:
+        protected_set.add(heading_elem)
+
+    lx1, ly1, lcx, lcy = brand_assets["dark_logo_box"]
+    lx2, ly2 = lx1 + lcx, ly1 + lcy
+    safe_lx1 = lx1 - int(0.10 * 914400)
+    safe_lx2 = lx2 + int(0.25 * 914400)
+    safe_ly2 = ly2 + int(0.15 * 914400)  # ~1.40" clear below 'a.' logo
+
+    snx1, sny1, sncx, sncy = brand_assets["snum_box"]
+    snx2, sny2 = snx1 + sncx, sny1 + sncy
+    safe_sny1 = sny1 - int(0.08 * 914400)  # ~6.81" clear above slide number
+
+    items = []
+    for el in list(new_slide.shapes._spTree):
+        tag = el.tag.split("}")[-1]
+        if tag not in ("sp", "pic", "grpSp", "graphicFrame", "cxnSp"):
+            continue
+        bbox = get_local_bbox(el)
+        if bbox is None:
+            continue
+        x1, y1, x2, y2 = bbox
+        w, h = x2 - x1, y2 - y1
+        if w <= 15000 and h <= 15000:
+            continue
+
+        is_backdrop = False
+        if tag == "sp" and shape_has_visual_fill(el):
+            if w >= int(2.2 * 914400) and h >= int(1.4 * 914400) and x2 >= lx1 and y1 <= ly1 + int(0.30 * 914400):
+                is_backdrop = True
+        elif tag in ("pic", "grpSp", "graphicFrame"):
+            if y1 <= int(0.20 * 914400) and y2 >= int(7.10 * 914400) and w >= int(3.6 * 914400) and x2 >= lx1:
+                is_backdrop = True
+
+        ph_node = el.find(f".//{{{P_NS}}}ph")
+        is_hdr_ph = ph_node is not None and ph_node.get("idx") in ("10", "12")
+
+        items.append({
+            "el": el,
+            "tag": tag,
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "w": w, "h": h,
+            "is_backdrop": is_backdrop,
+            "is_heading": (el in protected_set) or is_hdr_ph,
+        })
+
+    def _overlaps(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2):
+        return ax2 > bx1 and ax1 < bx2 and ay2 > by1 and ay1 < by2
+
+    # 1. Reflow foreground elements colliding with the top-right 'a.' logo
+    fg_items = [it for it in items if not it["is_backdrop"] and not it["is_heading"]]
+    colliding_fg = [
+        it for it in fg_items
+        if _overlaps(it["x1"], it["y1"], it["x2"], it["y2"], safe_lx1, int(0.10 * 914400), safe_lx2, safe_ly2)
+    ]
+
+    # Handle wide left-anchored tables/boxes that barely graze safe_lx1 horizontally
+    right_colliders = []
+    for it in colliding_fg:
+        if it["x1"] < int(4.2 * 914400) and it["w"] > int(7.2 * 914400):
+            if it["y1"] >= int(0.95 * 914400) and it["x2"] <= safe_lx1 + int(0.65 * 914400):
+                new_w = max(int(3.0 * 914400), safe_lx1 - it["x1"])
+                it["w"] = new_w
+                it["x2"] = it["x1"] + new_w
+                ensure_explicit_xfrm(it["el"], it["x1"], it["y1"], it["w"], it["h"])
+            elif it["y2"] + (safe_ly2 - it["y1"]) <= safe_sny1:
+                dy_push = safe_ly2 - it["y1"]
+                it["y1"] += dy_push
+                it["y2"] += dy_push
+                ensure_explicit_xfrm(it["el"], it["x1"], it["y1"], it["w"], it["h"])
+        else:
+            right_colliders.append(it)
+
+    if right_colliders:
+        # Determine the right-column horizontal span (matching sidebar panel if present, else row span)
+        right_panels = [
+            it for it in items
+            if it["is_backdrop"] and it["tag"] == "sp" and it["x1"] >= int(4.5 * 914400)
+        ]
+        if right_panels:
+            rp = right_panels[0]
+            col_x1 = rp["x1"] - int(0.15 * 914400)
+            col_x2 = rp["x2"] + int(0.15 * 914400)
+        else:
+            row_mates = list(right_colliders)
+            for cand in fg_items:
+                if cand["x1"] >= int(4.2 * 914400):
+                    for rc in right_colliders:
+                        v_ov = min(cand["y2"], rc["y2"]) - max(cand["y1"], rc["y1"])
+                        if v_ov >= 0.45 * min(max(1, cand["h"]), max(1, rc["h"])) or abs(cand["y1"] - rc["y1"]) <= int(0.22 * 914400):
+                            if cand not in row_mates:
+                                row_mates.append(cand)
+            col_x1 = min(m["x1"] for m in row_mates) - int(0.10 * 914400)
+            col_x2 = max(m["x2"] for m in row_mates) + int(0.10 * 914400)
+
+        col_fg = [
+            it for it in fg_items
+            if col_x1 <= (it["x1"] + it["x2"]) / 2.0 <= col_x2
+        ]
+        col_fg.sort(key=lambda z: (z["y1"], z["x1"]))
+
+        # Group horizontally-aligned items (e.g., 3 circular portraits) into row bands
+        bands = []
+        for it in col_fg:
+            placed = False
+            for b in bands:
+                b_h = max(1, b["y2"] - b["y1"])
+                v_ov = min(b["y2"], it["y2"]) - max(b["y1"], it["y1"])
+                if v_ov >= 0.45 * min(b_h, max(1, it["h"])) or abs(it["y1"] - b["y1"]) <= int(0.20 * 914400):
+                    b["members"].append(it)
+                    b["y1"] = min(b["y1"], it["y1"])
+                    b["y2"] = max(b["y2"], it["y2"])
+                    b["x2"] = max(b["x2"], it["x2"])
+                    placed = True
+                    break
+            if not placed:
+                bands.append({
+                    "members": [it],
+                    "y1": it["y1"],
+                    "y2": it["y2"],
+                    "x2": it["x2"],
+                })
+
+        if bands and bands[0]["y1"] < safe_ly2:
+            target_top = safe_ly2
+            min_gap = int(0.15 * 914400)
+            touches_snum_x = bool(right_panels) or any(b["x2"] > safe_lx1 for b in bands)
+            max_bottom = safe_sny1 if touches_snum_x else int(7.30 * 914400)
+
+            for b in bands:
+                b["orig_h"] = max(1, b["y2"] - b["y1"])
+
+            # Try pure downward shift/cascade without shrinking heights first
+            cur_y = target_top
+            trial_positions = []
+            for idx_b, b in enumerate(bands):
+                ny1 = max(b["y1"], cur_y) if idx_b > 0 else target_top
+                ny2 = ny1 + b["orig_h"]
+                trial_positions.append((ny1, ny2))
+                cur_y = ny2 + min_gap
+
+            h_scale = 1.0
+            if trial_positions[-1][1] > max_bottom:
+                # Pack tighter or gently scale heights so nothing touches the slide number or bottom edge
+                sum_h = sum(b["orig_h"] for b in bands)
+                avail_h = max(int(1.5 * 914400), max_bottom - target_top)
+                req_gaps = min_gap * max(0, len(bands) - 1)
+                if sum_h + req_gaps <= avail_h:
+                    extra = (avail_h - sum_h - req_gaps) / max(1, len(bands))
+                    cur_y = target_top
+                    trial_positions = []
+                    for b in bands:
+                        ny1 = cur_y
+                        ny2 = ny1 + b["orig_h"]
+                        trial_positions.append((ny1, ny2))
+                        cur_y = ny2 + min_gap + extra
+                else:
+                    h_scale = max(0.75, (avail_h - req_gaps) / max(1, sum_h))
+                    cur_y = target_top
+                    trial_positions = []
+                    for b in bands:
+                        bh = int(round(b["orig_h"] * h_scale))
+                        trial_positions.append((cur_y, cur_y + bh))
+                        cur_y += bh + min_gap
+
+            for b, (ny1, ny2) in zip(bands, trial_positions):
+                old_by1 = b["y1"]
+                for m in b["members"]:
+                    rel_y = (m["y1"] - old_by1) * h_scale
+                    new_my1 = ny1 + rel_y
+                    new_mh = m["h"] * h_scale
+                    new_mw = m["w"]
+                    new_mx1 = m["x1"]
+                    if m["tag"] == "pic" and h_scale < 0.995:
+                        new_mw = m["w"] * h_scale
+                        new_mx1 = (m["x1"] + m["x2"]) / 2.0 - new_mw / 2.0
+                    m["x1"] = int(round(new_mx1))
+                    m["y1"] = int(round(new_my1))
+                    m["w"] = int(round(new_mw))
+                    m["h"] = int(round(new_mh))
+                    m["x2"] = m["x1"] + m["w"]
+                    m["y2"] = m["y1"] + m["h"]
+                    ensure_explicit_xfrm(m["el"], m["x1"], m["y1"], m["w"], m["h"])
+
+    # 2. If a right-side colored panel itself contains text (like Screenshot 1's sidebar!),
+    # position its internal text frame into the largest open vertical window between top/bottom photos & logo
+    for rp in [it for it in items if it["is_backdrop"] and it["tag"] == "sp" and it["x1"] >= int(4.5 * 914400)]:
+        txbody = rp["el"].find(qn_p("txBody"))
+        if txbody is None:
+            continue
+        raw_t = "".join(t.text or "" for t in txbody.iter(qn_a("t"))).strip()
+        if not raw_t:
+            continue
+
+        zone_y1 = max(rp["y1"] + int(0.18 * 914400), safe_ly2 if rp["x2"] > safe_lx1 else rp["y1"] + int(0.18 * 914400))
+        zone_y2 = min(rp["y2"] - int(0.18 * 914400), safe_sny1 if rp["x2"] > safe_lx1 else rp["y2"] - int(0.18 * 914400))
+
+        # Subtract foreground shapes sitting on top of rp
+        pad = int(0.12 * 914400)
+        blocked = []
+        for fg in fg_items:
+            hov = min(rp["x2"], fg["x2"]) - max(rp["x1"], fg["x1"])
+            if hov > 0.30 * max(1, fg["w"]):
+                blocked.append((fg["y1"] - pad, fg["y2"] + pad))
+        blocked.sort()
+
+        free_windows = []
+        cur = zone_y1
+        for by1, by2 in blocked:
+            if by1 > cur:
+                free_windows.append((cur, min(zone_y2, by1)))
+            cur = max(cur, by2)
+        if cur < zone_y2:
+            free_windows.append((cur, zone_y2))
+
+        if free_windows:
+            win_y1, win_y2 = max(free_windows, key=lambda w_iv: w_iv[1] - w_iv[0])
+            if (win_y2 - win_y1) >= int(0.75 * 914400):
+                body_pr = txbody.find(qn_a("bodyPr"))
+                if body_pr is None:
+                    body_pr = etree.Element(qn_a("bodyPr"))
+                    txbody.insert(0, body_pr)
+                body_pr.set("tIns", str(max(0, int(round(win_y1 - rp["y1"])))))
+                body_pr.set("bIns", str(max(0, int(round(rp["y2"] - win_y2)))))
+                min_lr = int(0.32 * 914400)
+                for lr_k in ("lIns", "rIns"):
+                    try:
+                        cur_lr = int(body_pr.get(lr_k, "91440"))
+                    except ValueError:
+                        cur_lr = 91440
+                    if cur_lr < min_lr:
+                        body_pr.set(lr_k, str(min_lr))
+                if blocked or body_pr.get("anchor") in (None, "ctr"):
+                    body_pr.set("anchor", "ctr")
+
+    # 3. Check if any shape covers the SlideMaster's top-right 'a.' logo or bottom-right Slide Number
+    def _effective_color_at_box(box_tuple):
+        bx1, by1, bx2, by2 = box_tuple
+        cx = (bx1 + bx2) / 2.0
+        cy = (by1 + by2) / 2.0
+        lum = slide_bg_lum
+        rgb_hit = (255, 255, 255)
+        covered = False
+        for it in items:
+            if _overlaps(it["x1"], it["y1"], it["x2"], it["y2"], bx1, by1, bx2, by2):
+                covered = True
+                if it["x1"] <= cx <= it["x2"] and it["y1"] <= cy <= it["y2"]:
+                    if it["tag"] == "sp" and shape_has_visual_fill(it["el"]):
+                        sf = it["el"].find(f"{{{P_NS}}}spPr/{{{A_NS}}}solidFill/{{{A_NS}}}srgbClr")
+                        gf = it["el"].find(f"{{{P_NS}}}spPr/{{{A_NS}}}gradFill//{{{A_NS}}}srgbClr")
+                        clr_node = sf if sf is not None else gf
+                        if clr_node is not None and clr_node.get("val"):
+                            rgb_hit = hex_to_rgb(clr_node.get("val"))
+                            lum = perceived_brightness(rgb_hit)
+                    elif it["tag"] == "pic":
+                        sampled = sample_pic_region_lum(it["el"], new_slide, box_tuple)
+                        if sampled is not None:
+                            lum = sampled
+                            rgb_hit = (int(lum * 255), int(lum * 255), int(lum * 255))
+        return covered, lum, rgb_hit
+
+    logo_covered, logo_lum, logo_rgb = _effective_color_at_box((lx1, ly1, lx2, ly2))
+    if logo_covered and (brand_assets["dark_logo_blob"] is not None or brand_assets["light_logo_blob"] is not None):
+        is_cyan_bg = (0.42 <= logo_lum <= 0.72) and (logo_rgb[1] > logo_rgb[0] + 35 and logo_rgb[2] > logo_rgb[0] + 35)
+        if logo_lum < 0.42 and brand_assets["light_logo_blob"] is not None:
+            blob = brand_assets["light_logo_blob"]
+            bx, by, bcx, bcy = brand_assets["light_logo_box"]
+        elif is_cyan_bg and brand_assets.get("cyan_logo_blob") is not None:
+            blob = brand_assets["cyan_logo_blob"]
+            bx, by, bcx, bcy = brand_assets["dark_logo_box"]
+        else:
+            blob = brand_assets["dark_logo_blob"]
+            bx, by, bcx, bcy = brand_assets["dark_logo_box"]
+        if blob is not None:
+            new_slide.shapes.add_picture(io.BytesIO(blob), int(bx), int(by), int(bcx), int(bcy))
+
+    snum_covered, snum_lum, _ = _effective_color_at_box((snx1, sny1, snx2, sny2))
+    if snum_covered:
+        sn_hex = IFG_WHITE if snum_lum < 0.48 else IFG_NAVY
+        append_front_slide_number(new_slide, (snx1, sny1, sncx, sncy), slide_num_int, sn_hex)
+
+    # Guarantee unique <p:cNvPr id="..."> across the entire slide XML
+    for idx_id, cnv in enumerate(new_slide._element.iter(qn_p("cNvPr")), start=1):
+        cnv.set("id", str(idx_id))
+
+
 def build_arsipa_presentation(template_file, user_file):
     """
-    Converts every slide (N -> N) from user_file into template_file (Vorlage),
-    preserving 100% of the exact original layout, shapes, groups, tables, images,
-    SmartArt diagrams, and charts while restyling ONLY fonts (Abadi) and colors
-    (IfG / Arsipa Corporate Design).
+    Converts every slide (N -> N) from user_file into template_file (Vorlage):
+    - Slide 1 (Cover): Places the presentation title onto the official Vorlage Cover Slide
+      ('Kapitel mit großem Bild') in crisp White (#FFFFFF) Abadi text.
+    - Slides 2..N: Preserves 100% of the exact original layout, shapes, groups, tables,
+      images, SmartArt diagrams, and charts while restyling ONLY fonts (Abadi) and colors
+      (IfG / Arsipa Corporate Design).
     """
     output_prs = Presentation(template_file)
     user_prs = Presentation(user_file)
 
     catalog = scan_arsipa_template(output_prs)
     canvas_layout = output_prs.slide_layouts[catalog["canvas_leere_folie"]]
+    cover_layout = output_prs.slide_layouts[catalog["cover_layout"]]
+    brand_assets = extract_vorlage_brand_assets(output_prs)
 
     # Pre-scan deck colors for consistent 1:1 corporate color mapping
     mapper = DeckColorMapper(user_prs)
 
-    # Clear template sample slides safely (Single Presentation Instance rule)
+    user_slides = list(user_prs.slides)
+    use_cover_for_slide_1 = len(user_slides) > 0 and is_cover_slide_candidate(user_slides[0])
+
+    # Clear template sample slides safely (preserving Vorlage Slide 1 when used as Cover Slide!)
     slide_ids = list(output_prs.slides._sldIdLst)
-    for sld_id in slide_ids:
+    keep_template_slide_1 = use_cover_for_slide_1 and len(slide_ids) > 0
+    ids_to_drop = slide_ids[1:] if keep_template_slide_1 else slide_ids
+    for sld_id in ids_to_drop:
         r_id = sld_id.rId
         output_prs.part.drop_rel(r_id)
         output_prs.slides._sldIdLst.remove(sld_id)
@@ -1738,8 +3369,10 @@ def build_arsipa_presentation(template_file, user_file):
     scale = min(sx, sy)
     dx = (new_w - old_w * scale) / 2.0
     dy = (new_h - old_h * scale) / 2.0
-    aspect_differs = abs(sx - sy) > 0.04
     max_header_right = int(11.85 * 914400)  # Keep top headers clear of top-right Vorlage logo
+
+    repeated_corner_logos = detect_repeated_corner_logos(user_prs, scale, dx, dy)
+    repeated_header_kickers = collect_repeated_header_kickers(user_prs, old_w, old_h)
 
     pkg = output_prs.part.package
     pkg_parts = list(pkg.iter_parts()) if hasattr(pkg, "iter_parts") else getattr(pkg, "parts", [])
@@ -1747,11 +3380,44 @@ def build_arsipa_presentation(template_file, user_file):
     part_memo = {}
     processed_slides = []
 
-    for idx, old_slide in enumerate(user_prs.slides):
+    for idx, old_slide in enumerate(user_slides):
+        if idx == 0 and use_cover_for_slide_1:
+            cover_slide = output_prs.slides[0] if keep_template_slide_1 else output_prs.slides.add_slide(cover_layout)
+            primary_lines, subtitle_lines = extract_cover_title_lines(old_slide)
+            populate_vorlage_cover_slide(cover_slide, primary_lines, subtitle_lines)
+            full_cover_title = " — ".join(primary_lines + subtitle_lines)
+            processed_slides.append({
+                "index": idx,
+                "title": full_cover_title or "Titelfolie",
+                "layout_name": cover_slide.slide_layout.name,
+                "reason": "Offizielle IfG-Titelfolie (Kapitel mit großem Bild) • Titel in Weiß (#FFFFFF) & Abadi"
+            })
+            continue
+
         new_slide = output_prs.slides.add_slide(canvas_layout)
 
-        # Remove empty cloned layout placeholders on new_slide so no ghost boxes overlap user shapes
+        source_shapes = list(old_slide.shapes)
+        hdr_info = extract_slide_header_components(old_slide, source_shapes, old_w, old_h, repeated_header_kickers)
+        use_vorlage_header = hdr_info["use_vorlage_header"]
+        heading_sh = hdr_info["heading_sh"]
+
+        # Manage cloned layout placeholders on new_slide:
+        # Keep official Vorlage Titel (idx=10, 28pt) & Kapitel (idx=12, 12pt) when slide uses top header zone;
+        # always remove idx=3 (slide number) and unused placeholders so no ghost boxes overlap user shapes.
+        ph_titel_el = None
+        ph_kapitel_el = None
         for ph in list(new_slide.placeholders):
+            ph_idx = None
+            try:
+                ph_idx = ph.placeholder_format.idx
+            except Exception:
+                pass
+            if use_vorlage_header and ph_idx == 10 and ph_titel_el is None:
+                ph_titel_el = ph._element
+                continue
+            if use_vorlage_header and ph_idx == 12 and ph_kapitel_el is None:
+                ph_kapitel_el = ph._element
+                continue
             try:
                 new_slide.shapes._spTree.remove(ph._element)
             except Exception:
@@ -1777,18 +3443,59 @@ def build_arsipa_presentation(template_file, user_file):
                         csld.remove(existing_bg)
                     csld.insert(0, new_bg)
 
-        source_shapes = list(old_slide.shapes)
-        heading_sh = detect_slide_heading_shape(source_shapes)
-        slide_title_label = ""
-        if heading_sh is not None and getattr(heading_sh, "has_text_frame", False):
+        slide_title_label = " ".join(hdr_info["title_lines"]).strip()
+        if not slide_title_label and heading_sh is not None and getattr(heading_sh, "has_text_frame", False):
             slide_title_label = " ".join(heading_sh.text_frame.text.split())
 
         z_bg_stack = []
         copied_count = 0
+        heading_elem_on_new = None
+
+        # 0. Materialize any colored sidebar / header banner panels defined on old_slide.slide_layout
+        for lay_panel_el, (lx, ly, lw, lh), lay_obj in extract_layout_background_panels(old_slide, old_w, old_h):
+            p_elem = deepcopy(lay_panel_el)
+            ensure_explicit_xfrm(p_elem, lx * scale + dx, ly * scale + dy, lw * scale, lh * scale)
+            restyle_any_element(
+                p_elem,
+                theme_map=theme_map,
+                mapper=mapper,
+                z_bg_stack=z_bg_stack,
+                default_bg_lum=slide_bg_lum,
+                is_heading_shape=False,
+                font_scale=scale
+            )
+            copy_and_restyle_shape(
+                None, p_elem, lay_obj, new_slide,
+                theme_map=theme_map,
+                mapper=mapper,
+                used_partnames=used_partnames,
+                part_memo=part_memo
+            )
+            copied_count += 1
 
         for sh in source_shapes:
-            if should_skip_source_shape(sh):
+            if should_skip_source_shape(
+                sh, slide=old_slide, repeated_corner_logos=repeated_corner_logos, scale=scale, dx=dx, dy=dy
+            ):
                 continue
+
+            if sh is hdr_info["kapitel_sh"] and not hdr_info["kapitel_lines"]:
+                continue
+
+            if use_vorlage_header:
+                # Consumed into official Vorlage Kapitel (12pt) & Titel (28pt) placeholders
+                if sh is hdr_info["kapitel_sh"] or sh is hdr_info["top_title_sh"]:
+                    continue
+                # Skip duplicate tiny empty left-edge accent bar when Leere Folie already provides Rectangle 3
+                if (
+                    sh._element.tag.split("}")[-1] == "sp"
+                    and not (getattr(sh, "has_text_frame", False) and sh.text_frame and sh.text_frame.text.strip())
+                    and ((sh.left or 0) * scale + dx) <= int(0.08 * 914400)
+                    and int(0.35 * 914400) <= ((sh.top or 0) * scale + dy) <= int(0.90 * 914400)
+                    and (sh.width or 0) * scale <= int(0.75 * 914400)
+                    and (sh.height or 0) * scale <= int(0.35 * 914400)
+                ):
+                    continue
 
             if not slide_title_label and getattr(sh, "has_text_frame", False) and sh.text_frame.text.strip():
                 slide_title_label = " ".join(sh.text_frame.text.split())[:60]
@@ -1796,11 +3503,11 @@ def build_arsipa_presentation(template_file, user_file):
             elem = deepcopy(sh._element)
 
             is_top_left_hdr = (
-                aspect_differs
-                and sh == heading_sh
-                and (sh.top or 0) / 914400.0 < 1.05
-                and (sh.left or 0) / 914400.0 < 1.30
+                sh is heading_sh
+                and (sh.top or 0) / old_h <= 0.18
+                and (sh.left or 0) / old_w <= 0.25
             )
+            hdr_sz_mode = "title" if (sh is heading_sh and (sh.top or 0) / old_h <= 0.18) else None
 
             bbox = materialize_placeholder_and_transform(
                 sh, elem, old_slide,
@@ -1815,8 +3522,9 @@ def build_arsipa_presentation(template_file, user_file):
                 mapper=mapper,
                 z_bg_stack=z_bg_stack,
                 default_bg_lum=slide_bg_lum,
-                is_heading_shape=(sh == heading_sh),
-                font_scale=scale
+                is_heading_shape=(sh is heading_sh),
+                font_scale=scale,
+                header_size_mode=hdr_sz_mode
             )
 
             copy_and_restyle_shape(
@@ -1826,7 +3534,34 @@ def build_arsipa_presentation(template_file, user_file):
                 used_partnames=used_partnames,
                 part_memo=part_memo
             )
+            if sh is heading_sh:
+                heading_elem_on_new = elem
             copied_count += 1
+
+        hdr_elems = []
+        if use_vorlage_header:
+            hdr_elems = populate_vorlage_content_header(
+                new_slide,
+                ph_titel_el=ph_titel_el,
+                ph_kapitel_el=ph_kapitel_el,
+                title_lines=hdr_info["title_lines"],
+                kapitel_lines=hdr_info["kapitel_lines"],
+                subtitle_lines=hdr_info["subtitle_lines"],
+                z_bg_stack=z_bg_stack,
+                slide_bg_lum=slide_bg_lum,
+                brand_assets=brand_assets,
+            )
+            copied_count += len(hdr_elems)
+
+        # Harmonize right-sidebar bars, foreground portraits/boxes, and front-layer Vorlage 'a.' logo + slide number
+        resolve_logo_and_sidebar_layout(
+            new_slide,
+            slide_bg_lum=slide_bg_lum,
+            brand_assets=brand_assets,
+            slide_num_int=idx + 1,
+            heading_elem=heading_elem_on_new,
+            protected_elems=hdr_elems,
+        )
 
         processed_slides.append({
             "index": idx,

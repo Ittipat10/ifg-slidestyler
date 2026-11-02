@@ -1980,12 +1980,12 @@ def detect_slide_heading_shape(shapes, exclude_shapes=None, old_w=None, old_h=No
     """Finds the primary top heading/title shape on a slide (if any) without altering layout."""
     best = None
     best_score = -999
-    excl = exclude_shapes or set()
+    excl = list(exclude_shapes or ())
     ref_h = float(old_h) if old_h else (7.5 * 914400.0)
     ref_w = float(old_w) if old_w else (13.333 * 914400.0)
 
     for sh in shapes:
-        if sh in excl or should_skip_source_shape(sh):
+        if any(sh is x for x in excl) or should_skip_source_shape(sh):
             continue
         if not (getattr(sh, "has_text_frame", False) and sh.text_frame and sh.text_frame.text.strip()):
             continue
@@ -2121,7 +2121,7 @@ def extract_slide_header_components(old_slide, source_shapes, old_w, old_h, repe
                     kapitel_sh = sh
                     break
 
-    excl = {kapitel_sh} if kapitel_sh is not None else set()
+    excl = [kapitel_sh] if kapitel_sh is not None else []
     heading_sh = detect_slide_heading_shape(source_shapes, exclude_shapes=excl, old_w=old_w, old_h=old_h)
 
     top_title_sh = None
@@ -3034,9 +3034,9 @@ def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide
        corner logo or slide number, places the official 'a.' logo (dark or white for contrast)
        and slide number cleanly on the frontmost Z-layer.
     """
-    protected_set = set(protected_elems or ())
+    protected_list = list(protected_elems or ())
     if heading_elem is not None:
-        protected_set.add(heading_elem)
+        protected_list.append(heading_elem)
 
     lx1, ly1, lcx, lcy = brand_assets["dark_logo_box"]
     lx2, ly2 = lx1 + lcx, ly1 + lcy
@@ -3078,7 +3078,7 @@ def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide
             "x1": x1, "y1": y1, "x2": x2, "y2": y2,
             "w": w, "h": h,
             "is_backdrop": is_backdrop,
-            "is_heading": (el in protected_set) or is_hdr_ph,
+            "is_heading": any(el is p for p in protected_list) or is_hdr_ph,
         })
 
     def _overlaps(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2):

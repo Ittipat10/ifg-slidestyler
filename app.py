@@ -2045,8 +2045,8 @@ def detect_slide_heading_shape(shapes, exclude_shapes=None, old_w=None, old_h=No
 
 def collect_repeated_header_kickers(user_prs, old_w, old_h):
     """
-    Pre-scans content slides to identify repeating first-line kicker/chapter strings
-    inside 2-line top header boxes (e.g., 'Arbeitssystemanalyse [ASystA]' across slides).
+    Pre-scans content slides to identify repeating chapter / kicker strings across slides
+    (e.g., 'Kommunikation', 'Azubi-Class', or 'Arbeitssystemanalyse [ASystA]').
     """
     counts = Counter()
     for s_idx, slide in enumerate(user_prs.slides):
@@ -2057,10 +2057,16 @@ def collect_repeated_header_kickers(user_prs, old_w, old_h):
                 continue
             if not (getattr(sh, "has_text_frame", False) and sh.text_frame):
                 continue
-            if (sh.top or 0) / old_h > 0.18 or (sh.left or 0) / old_w > 0.35:
+            rel_t = (sh.top or 0) / old_h
+            rel_l = (sh.left or 0) / old_w
+            if rel_t > 0.22 or rel_l > 0.45:
                 continue
             paras = [" ".join(p.text.split()) for p in sh.text_frame.paragraphs if p.text and p.text.strip()]
+            if not paras:
+                continue
             if len(paras) >= 2 and 2 <= len(paras[0]) <= 85:
+                counts[paras[0].lower()] += 1
+            elif len(paras) == 1 and rel_t <= 0.12 and 2 <= len(paras[0]) <= 85:
                 counts[paras[0].lower()] += 1
     return {k for k, cnt in counts.items() if cnt >= 2}
 
@@ -2073,109 +2079,84 @@ def extract_slide_header_components(old_slide, source_shapes, old_w, old_h, repe
       - kapitel_sh: shape consumed as Kapitel (or None)
       - top_title_sh: shape consumed as Titel (or None)
       - heading_sh: general heading shape on slide (may be middle section divider or banner)
+      - consumed_shapes: list of source shapes consumed into Vorlage header
       - kapitel_lines: list[str]
       - title_lines: list[str]
       - subtitle_lines: list[str]
     """
-    kapitel_sh = None
-    # 1. Detect dedicated Kapitel shape (idx=12 at top, or small kicker box above title)
-    potential_other_top_titles = []
+    # 1. Collect all non-filled candidate text shapes in the top header zone
+    candidates = []
     for sh in source_shapes:
         if should_skip_source_shape(sh):
             continue
         if not (getattr(sh, "has_text_frame", False) and sh.text_frame and sh.text_frame.text.strip()):
             continue
-        if (sh.top or 0) / old_h <= 0.18 and (sh.left or 0) / old_w <= 0.38:
-            potential_other_top_titles.append(sh)
-
-    for sh in potential_other_top_titles:
         if sh._element.tag.split("}")[-1] != "sp":
             continue
-        ph_idx = None
-        if sh.is_placeholder:
+        if shape_has_visual_fill(sh._element):
+            continue
+        eff_y = sh.top
+        eff_x = sh.left
+        eff_h = sh.height
+        if (eff_y is None or eff_x is None) and sh.is_placeholder:
             try:
-                ph_idx = sh.placeholder_format.idx
+                inh_els = find_inherited_placeholder(
+                    old_slide,
+                    sh.placeholder_format.idx,
+                    sh.placeholder_format.type,
+                )
+                for inh in inh_els:
+                    off = inh.find(f".//{{{A_NS}}}off")
+                    ext = inh.find(f".//{{{A_NS}}}ext")
+                    if off is not None and eff_y is None:
+                        eff_y = int(off.get("y"))
+                    if off is not None and eff_x is None:
+                        eff_x = int(off.get("x"))
+                    if ext is not None and eff_h is None:
+                        eff_h = int(ext.get("cy"))
             except Exception:
                 pass
-        rel_top = (sh.top or 0) / old_h
-        rel_left = (sh.left or 0) / old_w
-        raw_txt = " ".join(sh.text_frame.text.split())
+        eff_y = eff_y if eff_y is not None else 0
+        eff_x = eff_x if eff_x is not None else 0
+        eff_h = eff_h if eff_h is not None else 0
 
-        # Explicit Vorlage Kapitel placeholder (idx=12 in top strip y <= 0.64")
-        if ph_idx == 12 and rel_top <= 0.085:
-            kapitel_sh = sh
-            break
-
-        # Non-title small kicker box at very top-left above a lower title or at y <= 0.31"
-        if ph_idx != 10 and rel_top <= 0.065 and rel_left <= 0.20 and not shape_has_visual_fill(sh._element):
-            non_empty_p = [p for p in sh.text_frame.paragraphs if p.text and p.text.strip()]
-            max_sz = get_shape_max_font_sz(sh, old_slide)
-            has_lower_title = any(
-                other is not sh
-                and (other.top or 0) > (sh.top or 0) + int(0.10 * 914400)
-                and len(other.text_frame.text.strip()) <= 160
-                for other in potential_other_top_titles
+        rel_top = eff_y / old_h
+        rel_left = eff_x / old_w
+        rel_h = eff_h / old_h
+        # Header zone: upper 15% of slide (y <= 1.15"), left 45%
+        if rel_top <= 0.15 and rel_left <= 0.45 and rel_h <= 0.25:
+            has_bullets = any(
+                sh._element.find(f".//{{{A_NS}}}{bt}") is not None
+                for bt in ("buChar", "buAutoNum", "buBlip")
             )
-            if len(raw_txt) <= 110 and len(non_empty_p) <= 2 and (max_sz == 0 or max_sz <= 1700):
-                if has_lower_title or (rel_top <= 0.042 and 0 < max_sz <= 1600):
-                    kapitel_sh = sh
-                    break
+            raw_t = " ".join(sh.text_frame.text.split())
+            if not has_bullets and len(raw_t) <= 160:
+                candidates.append((eff_y, sh))
 
-    excl = [kapitel_sh] if kapitel_sh is not None else []
-    heading_sh = detect_slide_heading_shape(source_shapes, exclude_shapes=excl, old_w=old_w, old_h=old_h)
+    candidates.sort(key=lambda t: t[0])
+    candidate_shapes = [t[1] for t in candidates]
 
+    kapitel_sh = None
     top_title_sh = None
-    if heading_sh is not None and heading_sh._element.tag.split("}")[-1] == "sp":
-        rel_top = (heading_sh.top or 0) / old_h
-        rel_left = (heading_sh.left or 0) / old_w
-        rel_h = (heading_sh.height or 0) / old_h
-        is_title_ph = False
-        if heading_sh.is_placeholder:
-            try:
-                pht = heading_sh.placeholder_format.type
-                phi = heading_sh.placeholder_format.idx
-                is_title_ph = pht in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE) or phi == 10
-            except Exception:
-                pass
-
-        has_bullets = any(
-            heading_sh._element.find(f".//{{{A_NS}}}{bt}") is not None
-            for bt in ("buChar", "buAutoNum", "buBlip")
-        )
-        non_empty_p = [p for p in heading_sh.text_frame.paragraphs if p.text and p.text.strip()]
-
-        if (
-            rel_top <= 0.18
-            and rel_left <= 0.38
-            and not shape_has_visual_fill(heading_sh._element)
-            and (is_title_ph or (rel_h <= 0.26 and len(non_empty_p) <= 3 and not has_bullets))
-        ):
-            top_title_sh = heading_sh
-
+    heading_sh = None
+    consumed_shapes = []
     kapitel_lines = []
     title_lines = []
     subtitle_lines = []
 
-    if kapitel_sh is not None:
-        for p in kapitel_sh.text_frame.paragraphs:
-            for ln in p.text.splitlines():
-                cleaned = " ".join(ln.split())
-                if cleaned and cleaned.lower() != "kapitel":
-                    kapitel_lines.append(cleaned)
-
-    if top_title_sh is not None:
+    def _extract_shape_paras(sh_node):
         tmap = extract_slide_theme_map(old_slide)
-        txbody = top_title_sh._element.find(qn_p("txBody"))
+        txbody = sh_node._element.find(qn_p("txBody"))
         lst = txbody.find(qn_a("lstStyle")) if txbody is not None else None
         lvl_sz = {}
         lvl_b = {}
         lvl_rgb = {}
-        if top_title_sh.is_placeholder:
+        if sh_node.is_placeholder:
             try:
                 inh_els = find_inherited_placeholder(
                     old_slide,
-                    top_title_sh.placeholder_format.idx,
-                    top_title_sh.placeholder_format.type,
+                    sh_node.placeholder_format.idx,
+                    sh_node.placeholder_format.type,
                 )
                 inh_props = extract_inherited_level_props(inh_els, is_title_ph=True)
                 for l_i, d in inh_props.items():
@@ -2202,7 +2183,7 @@ def extract_slide_header_components(old_slide, source_shapes, old_w, old_h, repe
                         if res is not None:
                             lvl_rgb[l_i] = res[0]
 
-        para_meta = []
+        meta = []
         if txbody is not None:
             for p_el in txbody.findall(qn_a("p")):
                 ppr = p_el.find(qn_a("pPr"))
@@ -2229,7 +2210,6 @@ def extract_slide_header_components(old_slide, source_shapes, old_w, old_h, repe
                 if run_szs:
                     eff_sz = max(run_szs)
 
-                # Split explicit <a:br/> line breaks cleanly inside the paragraph
                 chunks = [[]]
                 for ch in p_el:
                     ctag = ch.tag.split("}")[-1]
@@ -2241,48 +2221,73 @@ def extract_slide_header_components(old_slide, source_shapes, old_w, old_h, repe
                         chunks.append([])
                 joined_chunks = [" ".join("".join(c).split()) for c in chunks if "".join(c).strip()]
                 if joined_chunks:
-                    para_meta.append((" |BR| ".join(joined_chunks), joined_chunks, eff_sz, eff_b, eff_rgb))
+                    meta.append((" |BR| ".join(joined_chunks), joined_chunks, eff_sz, eff_b, eff_rgb))
+        return meta
 
-        if len(para_meta) == 1:
-            title_lines.extend(para_meta[0][1])
-        elif len(para_meta) == 2 and not kapitel_lines:
-            (_, ch0, sz0, b0, rgb0), (_, ch1, sz1, b1, rgb1) = para_meta
-            t0 = " ".join(ch0)
-            t1 = " ".join(ch1)
+    if len(candidate_shapes) >= 2:
+        # candidate_shapes is already sorted top-to-bottom: upper shape is Kapitel, lower shape is Titel!
+        kapitel_sh = candidate_shapes[0]
+        top_title_sh = candidate_shapes[1]
+        heading_sh = candidate_shapes[1]
+        consumed_shapes = list(candidate_shapes)
+
+        for p in kapitel_sh.text_frame.paragraphs:
+            for ln in p.text.splitlines():
+                cleaned = " ".join(ln.split())
+                if cleaned and cleaned.lower() != "kapitel":
+                    kapitel_lines.append(cleaned)
+
+        t_meta = _extract_shape_paras(top_title_sh)
+        for pm in t_meta:
+            title_lines.extend(pm[1])
+
+        # If there are 3+ candidates in the header strip (e.g. 2nd line of title)
+        for extra_sh in candidate_shapes[2:]:
+            ex_meta = _extract_shape_paras(extra_sh)
+            for pm in ex_meta:
+                title_lines.extend(pm[1])
+
+    elif len(candidate_shapes) == 1:
+        c0 = candidate_shapes[0]
+        top_title_sh = c0
+        heading_sh = c0
+        consumed_shapes = [c0]
+        p_meta = _extract_shape_paras(c0)
+
+        if len(p_meta) == 1:
+            title_lines.extend(p_meta[0][1])
+        elif len(p_meta) >= 2:
+            t0 = " ".join(p_meta[0][1])
+            sz0 = p_meta[0][2]
+            sz1 = p_meta[1][2]
             is_kicker_first = (
-                len(ch0) == 1
+                len(p_meta[0][1]) == 1
                 and len(t0) <= 85
                 and (
                     (t0.lower() in repeated_first_lines)
                     or (sz0 > 0 and sz1 > 0 and sz0 < sz1)
+                    or (len(t0) <= 50 and len(" ".join(p_meta[1][1])) <= 120 and len(p_meta) == 2)
                 )
             )
             if is_kicker_first:
                 if t0.lower() != "kapitel":
                     kapitel_lines.append(t0)
-                title_lines.extend(ch1)
-            elif len(t0) + len(t1) <= 68 and len(ch0) == 1 and len(ch1) == 1:
-                sep = " " if t0.endswith((":", "–", "-", "?", "!")) else " – "
-                title_lines.append(f"{t0}{sep}{t1}")
+                for pm in p_meta[1:]:
+                    title_lines.extend(pm[1])
             else:
-                title_lines.extend(ch0)
-                title_lines.extend(ch1)
-        elif len(para_meta) >= 2:
-            if not kapitel_lines:
-                first_t = " ".join(para_meta[0][1])
-                if len(para_meta[0][1]) == 1 and (
-                    first_t.lower() in repeated_first_lines
-                    or (0 < para_meta[0][2] < para_meta[1][2])
-                ):
-                    if first_t.lower() != "kapitel":
-                        kapitel_lines.append(first_t)
-                    for pm in para_meta[1:]:
-                        title_lines.extend(pm[1])
-                else:
-                    for pm in para_meta:
-                        title_lines.extend(pm[1])
-            else:
-                for pm in para_meta:
+                for pm in p_meta:
+                    title_lines.extend(pm[1])
+
+    else:
+        # Fallback for centered dividers / non-standard headings
+        heading_sh = detect_slide_heading_shape(source_shapes, old_w=old_w, old_h=old_h)
+        if heading_sh is not None and heading_sh._element.tag.split("}")[-1] == "sp":
+            rel_top = (heading_sh.top or 0) / old_h
+            if rel_top <= 0.18 and not shape_has_visual_fill(heading_sh._element):
+                top_title_sh = heading_sh
+                consumed_shapes = [heading_sh]
+                p_meta = _extract_shape_paras(heading_sh)
+                for pm in p_meta:
                     title_lines.extend(pm[1])
 
     use_vorlage_header = bool(title_lines or kapitel_lines or subtitle_lines)
@@ -2291,6 +2296,7 @@ def extract_slide_header_components(old_slide, source_shapes, old_w, old_h, repe
         "kapitel_sh": kapitel_sh,
         "top_title_sh": top_title_sh,
         "heading_sh": heading_sh,
+        "consumed_shapes": consumed_shapes,
         "kapitel_lines": kapitel_lines,
         "title_lines": title_lines,
         "subtitle_lines": subtitle_lines,
@@ -3484,8 +3490,27 @@ def build_arsipa_presentation(template_file, user_file):
 
             if use_vorlage_header:
                 # Consumed into official Vorlage Kapitel (12pt) & Titel (28pt) placeholders
+                if any(sh is cs for cs in hdr_info.get("consumed_shapes", [])):
+                    continue
                 if sh is hdr_info["kapitel_sh"] or sh is hdr_info["top_title_sh"]:
                     continue
+
+                # Safeguard against any leftover header shape in top header zone matching title/kapitel
+                if (
+                    getattr(sh, "has_text_frame", False)
+                    and not shape_has_visual_fill(sh._element)
+                    and (sh.top or 0) / old_h <= 0.22
+                    and (sh.left or 0) / old_w <= 0.45
+                ):
+                    sh_raw = " ".join(sh.text_frame.text.split()).lower()
+                    all_hdr = [
+                        " ".join(t.split()).lower()
+                        for t in (hdr_info["kapitel_lines"] + hdr_info["title_lines"] + hdr_info.get("subtitle_lines", []))
+                        if t.strip()
+                    ]
+                    if any(sh_raw == h or (len(sh_raw) >= 4 and sh_raw in h) or (len(h) >= 4 and h in sh_raw) for h in all_hdr):
+                        continue
+
                 # Skip duplicate tiny empty left-edge accent bar when Leere Folie already provides Rectangle 3
                 if (
                     sh._element.tag.split("}")[-1] == "sp"

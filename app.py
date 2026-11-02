@@ -1420,6 +1420,14 @@ def allocate_unique_packuri(orig_uri_str, used_partnames):
         counter += 1
 
 
+def make_part(uri, content_type, blob, package):
+    """Constructs an OPC Part instance compatible with all python-pptx versions (0.6.x and 1.0.x)."""
+    try:
+        return Part(uri, content_type, package=package, blob=blob)
+    except TypeError:
+        return Part(uri, content_type, blob=blob, package=package)
+
+
 def clone_part_into_package(old_part, dst_pkg, used_partnames, part_memo, theme_map, mapper, extra_xml_transform=None):
     """Recursively clones an OPC Part (image, SVG, SmartArt, chart, workbook, media) without name collisions."""
     key = id(old_part)
@@ -1448,7 +1456,7 @@ def clone_part_into_package(old_part, dst_pkg, used_partnames, part_memo, theme_
     if extra_xml_transform is not None:
         new_blob = extra_xml_transform(new_blob)
 
-    new_part = Part(new_uri, ctype, new_blob, dst_pkg)
+    new_part = make_part(new_uri, ctype, new_blob, dst_pkg)
     if extra_xml_transform is None:
         part_memo[key] = new_part
 

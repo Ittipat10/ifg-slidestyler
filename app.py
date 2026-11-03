@@ -4198,21 +4198,19 @@ def build_arsipa_presentation(template_file, user_file):
             "reason": f"1:1 Original-Aufbau erhalten ({copied_count} Elemente) • Schriftart Abadi & IfG-Farben angewendet"
         })
 
-    # If the presentation did NOT end with a closing slide, always append Slide 2 of Vorlage Kurzfassung
+    # If the presentation did NOT end with a closing slide, always append Slide 12 of Vorlage Kurzfassung
     if not has_closing_slide and num_user_slides > 0:
-        deck_title = " — ".join(primary_lines) if primary_lines else None
         final_slide = import_vorlage_kurzfassung_slide(
             output_prs,
-            slide_index_0_based=1,  # Slide 2: Kapitel mit großem Bild
-            title_text=deck_title,
+            slide_index_0_based=11,  # Slide 12: Abschluss
             used_partnames=used_partnames,
             part_memo=part_memo,
         )
         processed_slides.append({
             "index": len(processed_slides),
-            "title": deck_title or "Kapitel mit großem Bild",
+            "title": "Abschluss (Vielen Dank!)",
             "layout_name": final_slide.slide_layout.name,
-            "reason": "Offizielle IfG-Schlussfolie (Vorlage Kurzfassung Folie 2 • Kapitel mit großem Bild)"
+            "reason": "Offizielle IfG-Abschlussfolie (Vorlage Kurzfassung Folie 12 • Abschluss)"
         })
 
     out_buf = io.BytesIO()

@@ -333,6 +333,21 @@ DARK_BRAND_SWATCHES = ["012641", "04305C", "006174", "007A8C"]
 MID_BRAND_SWATCHES = ["3EB9C0", "00A8B7", "2B7A9B", "00B7E0"]
 LIGHT_BRAND_SWATCHES = ["D9F0F2", "E8F5F6", "C5E4EE", "F1F5F9"]
 
+# Official Arsipa / IfG Diagram & Chart Color Palette (Reference: media_1793700302459_9055320c.png)
+# Pie Chart: Slices 1..4 -> Deep Navy (#012641), Light Cyan (#3EB9C0), Teal (#00A8B7), Deep Teal (#006174) with White separator lines
+# Column/Bar: Single series -> Deep Navy (#012641); Multi-series -> follows CHART_DIAGRAM_PALETTE
+# Line Chart: Series 1..3 -> Deep Navy (#012641), Light Cyan (#3EB9C0), Teal (#00A8B7)
+CHART_DIAGRAM_PALETTE = [
+    "012641",  # Series / Slice 1: Deep Navy ("สีน้ำเงินเข้ม", accent1)
+    "3EB9C0",  # Series / Slice 2: Light Blue / Cyan ("ฟ้าอ่อน", accent2)
+    "00A8B7",  # Series / Slice 3: Corporate Teal (accent3)
+    "006174",  # Series / Slice 4: Deep Teal (accent4)
+    "2B7A9B",  # Series / Slice 5: Steel Blue
+    "57577C",  # Series / Slice 6: Muted Slate Navy (accent6)
+    "00B7E0",  # Series / Slice 7: Bright Cyan (hlink)
+    "8C96A5",  # Series / Slice 8: Muted Slate Gray
+]
+
 SYMBOL_FONTS = {
     "wingdings", "wingdings 2", "wingdings 3", "webdings", "symbol",
     "marlett", "ms outlook", "bookshelf symbol 7", "segoe mdl2 assets",
@@ -363,6 +378,10 @@ def qn_a(tag):
 
 def qn_p(tag):
     return f"{{{P_NS}}}{tag}"
+
+
+def qn_c(tag):
+    return f"{{{C_NS}}}{tag}"
 
 
 def safe_shape_type(shape):
@@ -876,18 +895,19 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                     and run_sz <= 1800
                 )
 
-                # Enforce official Title (28pt) / Kapitel (12pt) sizes or scale proportionally
+                # Enforce official Title (28pt) / Kapitel (12pt) sizes or preserve / scale proportionally
                 if header_size_mode == "kapitel" or is_kicker_run_in_title:
                     rpr.set("sz", KAPITEL_FONT_SZ)
                     rpr.set("b", "0")
                 elif header_size_mode == "title":
                     rpr.set("sz", TITLE_FONT_SZ)
                     rpr.set("b", "0")
-                elif abs(font_scale - 1.0) > 0.02 and rpr.get("sz"):
-                    try:
-                        rpr.set("sz", str(int(round(int(rpr.get("sz")) * font_scale))))
-                    except ValueError:
-                        pass
+                else:
+                    target_sz = run_sz
+                    if abs(font_scale - 1.0) > 0.02 and target_sz > 0:
+                        target_sz = int(round(target_sz * font_scale))
+                    if target_sz > 0:
+                        rpr.set("sz", str(target_sz))
 
                 # Resolve original text color
                 orig_rgb = p_def_rgb
@@ -951,6 +971,8 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                     child.set("sz", KAPITEL_FONT_SZ)
                 elif header_size_mode == "title":
                     child.set("sz", TITLE_FONT_SZ)
+                elif p_def_sz > 0 and not child.get("sz"):
+                    child.set("sz", str(int(round(p_def_sz * font_scale)) if abs(font_scale - 1.0) > 0.02 else p_def_sz))
                 end_sf = child.find(qn_a("solidFill"))
                 if end_sf is not None:
                     write_srgb_into_parent(end_sf, IFG_WHITE if bg_lum < 0.48 else (IFG_NAVY if is_heading_shape else IFG_CHARCOAL))
@@ -985,30 +1007,146 @@ def find_inherited_placeholder(old_slide, ph_idx, ph_type):
     return matches
 
 
-def extract_inherited_level_props(ph_elems, is_title_ph=False):
-    """Extracts inherited {lvl_int: {'sz': str, 'b': str, 'algn': str, 'buNone': bool}} from layout/master."""
+def get_shape_effective_geometry(sh, slide=None):
+    """
+    Returns (left, top, width, height) in EMUs.
+    If sh is a placeholder and has no explicit xfrm, walks layout and master
+    to resolve true coordinates so rel_top is never mistakenly 0.
+    """
+    x = getattr(sh, "left", None)
+    y = getattr(sh, "top", None)
+    w = getattr(sh, "width", None)
+    h = getattr(sh, "height", None)
+    if (x is None or y is None or w is None or h is None) and getattr(sh, "is_placeholder", False) and slide is not None:
+        try:
+            ph_idx = sh.placeholder_format.idx
+            ph_type = sh.placeholder_format.type
+            inh_els = find_inherited_placeholder(slide, ph_idx, ph_type)
+            for inh in inh_els:
+                off = inh.find(f".//{{{A_NS}}}off")
+                ext = inh.find(f".//{{{A_NS}}}ext")
+                if off is not None:
+                    if x is None and off.get("x") is not None:
+                        x = int(off.get("x"))
+                    if y is None and off.get("y") is not None:
+                        y = int(off.get("y"))
+                if ext is not None:
+                    if w is None and ext.get("cx") is not None:
+                        w = int(ext.get("cx"))
+                    if h is None and ext.get("cy") is not None:
+                        h = int(ext.get("cy"))
+                if x is not None and y is not None and w is not None and h is not None:
+                    break
+        except Exception:
+            pass
+    return (
+        x if x is not None else 0,
+        y if y is not None else 0,
+        w if w is not None else 0,
+        h if h is not None else 0,
+    )
+
+
+def is_centered_divider_slide(slide, old_w, old_h, use_vorlage_header=False):
+    """
+    Returns True if slide is a chapter divider / transition / centered single-text slide:
+    - No top header consumed into Vorlage header
+    - Contains 1 or 2 text shapes total (no data tables, charts, or heavy bullet body boxes)
+    - Primary text shape is located in middle zone (0.18 <= rel_top <= 0.80)
+    - Short/medium heading text (<= 140 chars)
+    """
+    if use_vorlage_header:
+        return False
+
+    content_shapes = []
+    for sh in slide.shapes:
+        if should_skip_source_shape(sh, slide=slide):
+            continue
+        eff_x, eff_y, eff_w, eff_h = get_shape_effective_geometry(sh, slide)
+        if eff_w >= 0.85 * old_w and eff_h >= 0.85 * old_h:
+            # Full slide background panel
+            continue
+        tag = sh._element.tag.split("}")[-1]
+        if tag in ("graphicFrame", "grpSp"):
+            return False
+        if getattr(sh, "has_text_frame", False) and sh.text_frame and sh.text_frame.text.strip():
+            content_shapes.append((sh, eff_x, eff_y, eff_w, eff_h))
+
+    if not (1 <= len(content_shapes) <= 2):
+        return False
+
+    main_sh, mx, my, mw, mh = content_shapes[0]
+    raw_txt = " ".join(main_sh.text_frame.text.split())
+    if len(raw_txt) > 140:
+        return False
+
+    rel_top = my / old_h
+    return 0.18 <= rel_top <= 0.80
+
+
+def extract_inherited_level_props(ph_elems, is_title_ph=False, slide_master=None):
+    """Extracts inherited {lvl_int: {'sz': str, 'b': str, 'algn': str, 'buNone': bool}} from layout/master/txStyles."""
     props = {i: {} for i in range(9)}
-    # Walk master first, then layout so layout overrides master
+
+    # 1. Slide master txStyles fallback (titleStyle, bodyStyle, otherStyle)
+    if slide_master is not None:
+        try:
+            tx_styles = slide_master._element.find(f".//{{{P_NS}}}txStyles")
+            if tx_styles is not None:
+                style_container = tx_styles.find(qn_p("titleStyle" if is_title_ph else "bodyStyle"))
+                if style_container is None and is_title_ph:
+                    style_container = tx_styles.find(qn_p("bodyStyle"))
+                if style_container is not None:
+                    for lvl_idx in range(9):
+                        lp = style_container.find(qn_a(f"lvl{lvl_idx + 1}pPr"))
+                        if lp is not None:
+                            if lp.get("algn"):
+                                props[lvl_idx]["algn"] = lp.get("algn")
+                            dr = lp.find(qn_a("defRPr"))
+                            if dr is not None:
+                                if dr.get("sz"):
+                                    props[lvl_idx]["sz"] = dr.get("sz")
+                                if dr.get("b"):
+                                    props[lvl_idx]["b"] = dr.get("b")
+        except Exception:
+            pass
+
+    # 2. Walk master first, then layout so layout overrides master
     for el in reversed(ph_elems):
         lst = el.find(f".//{{{P_NS}}}txBody/{{{A_NS}}}lstStyle")
-        if lst is None:
-            continue
-        for lvl_idx in range(9):
-            lp = lst.find(qn_a(f"lvl{lvl_idx + 1}pPr"))
-            if lp is None:
-                continue
-            if lp.get("algn"):
-                props[lvl_idx]["algn"] = lp.get("algn")
-            if lp.find(qn_a("buNone")) is not None:
-                props[lvl_idx]["buNone"] = True
-            elif any(lp.find(qn_a(bt)) is not None for bt in ("buChar", "buAutoNum", "buBlip")):
-                props[lvl_idx]["buNone"] = False
-            dr = lp.find(qn_a("defRPr"))
-            if dr is not None:
-                if dr.get("sz"):
-                    props[lvl_idx]["sz"] = dr.get("sz")
-                if dr.get("b"):
-                    props[lvl_idx]["b"] = dr.get("b")
+        if lst is not None:
+            for lvl_idx in range(9):
+                lp = lst.find(qn_a(f"lvl{lvl_idx + 1}pPr"))
+                if lp is None:
+                    continue
+                if lp.get("algn"):
+                    props[lvl_idx]["algn"] = lp.get("algn")
+                if lp.find(qn_a("buNone")) is not None:
+                    props[lvl_idx]["buNone"] = True
+                elif any(lp.find(qn_a(bt)) is not None for bt in ("buChar", "buAutoNum", "buBlip")):
+                    props[lvl_idx]["buNone"] = False
+                dr = lp.find(qn_a("defRPr"))
+                if dr is not None:
+                    if dr.get("sz"):
+                        props[lvl_idx]["sz"] = dr.get("sz")
+                    if dr.get("b"):
+                        props[lvl_idx]["b"] = dr.get("b")
+
+        # Also inspect paragraph defRPr in txBody
+        txb = el.find(qn_p("txBody"))
+        if txb is not None:
+            for p_el in txb.findall(qn_a("p")):
+                ppr = p_el.find(qn_a("pPr"))
+                lvl_val = int(ppr.get("lvl", "0")) if (ppr is not None and ppr.get("lvl", "0").isdigit()) else 0
+                if ppr is not None:
+                    if ppr.get("algn") and "algn" not in props[lvl_val]:
+                        props[lvl_val]["algn"] = ppr.get("algn")
+                    dr = ppr.find(qn_a("defRPr"))
+                    if dr is not None:
+                        if dr.get("sz"):
+                            props[lvl_val]["sz"] = dr.get("sz")
+                        if dr.get("b"):
+                            props[lvl_val]["b"] = dr.get("b")
 
     if is_title_ph:
         if "sz" not in props[0]:
@@ -1210,18 +1348,15 @@ def ensure_explicit_xfrm(elem, x, y, cx, cy):
     ext.set("cy", str(max(0, int(round(cy)))))
 
 
-def materialize_placeholder_and_transform(sh, elem, old_slide, scale, dx, dy, is_top_left_header=False, max_header_right=None):
+def materialize_placeholder_and_transform(sh, elem, old_slide, scale, dx, dy, is_top_left_header=False, max_header_right=None, is_centered_divider=False):
     """
     Materializes inherited placeholder coordinates, geometry, fills, borders, bodyPr margins/anchor,
     and typography if sh.is_placeholder, strips <p:ph> so it never collides with Vorlage placeholders,
     and applies aspect-ratio-safe slide coordinate mapping.
     """
-    orig_x = sh.left if sh.left is not None else 0
-    orig_y = sh.top if sh.top is not None else 0
-    orig_cx = sh.width if sh.width is not None else 0
-    orig_cy = sh.height if sh.height is not None else 0
+    orig_x, orig_y, orig_cx, orig_cy = get_shape_effective_geometry(sh, old_slide)
 
-    if sh.is_placeholder:
+    if getattr(sh, "is_placeholder", False):
         ph_idx = None
         ph_type = None
         is_title_ph = False
@@ -1296,7 +1431,8 @@ def materialize_placeholder_and_transform(sh, elem, old_slide, scale, dx, dy, is
                         elem.insert(sp_pr_idx + 1, deepcopy(inh_style))
                         break
 
-        lvl_props = extract_inherited_level_props(inherited_els, is_title_ph=is_title_ph)
+        slide_m = getattr(getattr(old_slide, "slide_layout", None), "slide_master", None)
+        lvl_props = extract_inherited_level_props(inherited_els, is_title_ph=is_title_ph, slide_master=slide_m)
 
         txbody = elem.find(qn_p("txBody"))
         if txbody is not None:
@@ -1322,6 +1458,9 @@ def materialize_placeholder_and_transform(sh, elem, old_slide, scale, dx, dy, is
                 if attr_k in inh_bpr_attrs and body_pr.get(attr_k) is None:
                     body_pr.set(attr_k, inh_bpr_attrs[attr_k])
 
+            if is_centered_divider and body_pr.get("anchor") is None:
+                body_pr.set("anchor", "ctr")
+
             if abs(scale - 1.0) > 0.02:
                 for ins_k in ("lIns", "tIns", "rIns", "bIns"):
                     if body_pr.get(ins_k) is not None:
@@ -1339,11 +1478,13 @@ def materialize_placeholder_and_transform(sh, elem, old_slide, scale, dx, dy, is
                 lvl = int(ppr.get("lvl", "0")) if ppr is not None else 0
                 inh = lvl_props.get(min(lvl, 8), {})
 
-                if inh.get("algn") or inh.get("buNone"):
+                if inh.get("algn") or inh.get("buNone") or is_centered_divider:
                     if ppr is None:
                         ppr = etree.Element(qn_a("pPr"))
                         p.insert(0, ppr)
-                    if inh.get("algn") and not ppr.get("algn"):
+                    if is_centered_divider and not ppr.get("algn"):
+                        ppr.set("algn", "ctr")
+                    elif inh.get("algn") and not ppr.get("algn"):
                         ppr.set("algn", inh["algn"])
                     if inh.get("buNone") and not any(
                         ppr.find(qn_a(bt)) is not None for bt in ("buNone", "buChar", "buAutoNum", "buBlip")
@@ -1359,6 +1500,10 @@ def materialize_placeholder_and_transform(sh, elem, old_slide, scale, dx, dy, is
                         rpr.set("sz", inh["sz"])
                     if inh.get("b") and not rpr.get("b"):
                         rpr.set("b", inh["b"])
+
+                ep = p.find(qn_a("endParaRPr"))
+                if ep is not None and inh.get("sz") and not ep.get("sz"):
+                    ep.set("sz", inh["sz"])
 
         # Remove <p:ph> from <p:nvPr> so it stands as an exact-coordinate native object
         for nv_pr in elem.findall(f".//{{{P_NS}}}nvPr"):
@@ -1694,8 +1839,33 @@ def restyle_any_element(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, i
 
 # ----------------- 5. SMARTART, CHART & RELATIONSHIP SAFE CLONER -----------------
 
+def _set_chart_solid_fill(sp_pr, hex_val):
+    for ftag in ("noFill", "solidFill", "gradFill", "blipFill", "pattFill"):
+        old = sp_pr.find(qn_a(ftag))
+        if old is not None:
+            sp_pr.remove(old)
+    sf = etree.SubElement(sp_pr, qn_a("solidFill"))
+    clr = etree.SubElement(sf, qn_a("srgbClr"))
+    clr.set("val", hex_val)
+
+
+def _set_chart_line_fill(sp_pr, hex_val, width=None):
+    ln = sp_pr.find(qn_a("ln"))
+    if ln is None:
+        ln = etree.SubElement(sp_pr, qn_a("ln"))
+    if width:
+        ln.set("w", str(width))
+    for ftag in ("noFill", "solidFill", "gradFill", "pattFill"):
+        old = ln.find(qn_a(ftag))
+        if old is not None:
+            ln.remove(old)
+    sf = etree.SubElement(ln, qn_a("solidFill"))
+    clr = etree.SubElement(sf, qn_a("srgbClr"))
+    clr.set("val", hex_val)
+
+
 def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
-    """Updates fonts to Abadi and harmonizes colors inside cloned SmartArt / Chart XML parts."""
+    """Updates fonts to Abadi and harmonizes colors inside cloned SmartArt / Chart XML parts according to CHART_DIAGRAM_PALETTE."""
     try:
         root = etree.fromstring(xml_bytes)
     except Exception:
@@ -1711,14 +1881,93 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
         r_txt = t_el.text if t_el is not None and t_el.text else ""
         apply_corporate_font_to_rpr(rpr, r_txt)
 
-    # 2. If SmartArt colors.xml or drawing.xml relied on a light/medium accent1 in source theme,
+    # 2. Dedicated Chart Styler (Pie, Bar/Histogram, Line, Scatter, Area, Radar)
+    if "/charts/" in pname:
+        # 2a. Pie & Doughnut charts: apply official Arsipa slice colors with white dividers
+        for pie in root.findall(f".//{{{C_NS}}}pieChart") + root.findall(f".//{{{C_NS}}}doughnutChart") + root.findall(f".//{{{C_NS}}}pie3DChart"):
+            for ser in pie.findall(f"{{{C_NS}}}ser"):
+                dpts = ser.findall(f"{{{C_NS}}}dPt")
+                if dpts:
+                    for i, dpt in enumerate(dpts):
+                        c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
+                        sp_pr = dpt.find(f"{{{C_NS}}}spPr")
+                        if sp_pr is None:
+                            sp_pr = etree.Element(f"{{{C_NS}}}spPr")
+                            dpt.append(sp_pr)
+                        _set_chart_solid_fill(sp_pr, c_hex)
+                        _set_chart_line_fill(sp_pr, "FFFFFF", width=19050)
+                else:
+                    pt_count_el = ser.find(f".//{{{C_NS}}}val//{{{C_NS}}}ptCount")
+                    num_pts = int(pt_count_el.get("val", "0")) if pt_count_el is not None else 0
+                    if num_pts > 0:
+                        for i in range(num_pts):
+                            c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
+                            dpt = etree.Element(f"{{{C_NS}}}dPt")
+                            idx_el = etree.SubElement(dpt, f"{{{C_NS}}}idx")
+                            idx_el.set("val", str(i))
+                            sp_pr = etree.SubElement(dpt, f"{{{C_NS}}}spPr")
+                            _set_chart_solid_fill(sp_pr, c_hex)
+                            _set_chart_line_fill(sp_pr, "FFFFFF", width=19050)
+                            ser.append(dpt)
+
+        # 2b. Bar & Column charts (Single series -> Deep Navy #012641; Multi series -> follows palette)
+        for bar in root.findall(f".//{{{C_NS}}}barChart") + root.findall(f".//{{{C_NS}}}bar3DChart"):
+            sers = bar.findall(f"{{{C_NS}}}ser")
+            for i, ser in enumerate(sers):
+                c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
+                sp_pr = ser.find(f"{{{C_NS}}}spPr")
+                if sp_pr is None:
+                    sp_pr = etree.Element(f"{{{C_NS}}}spPr")
+                    ser.insert(min(2, len(ser)), sp_pr)
+                _set_chart_solid_fill(sp_pr, c_hex)
+
+        # 2c. Line & Scatter charts: apply official Arsipa line & marker colors
+        for line in root.findall(f".//{{{C_NS}}}lineChart") + root.findall(f".//{{{C_NS}}}scatterChart") + root.findall(f".//{{{C_NS}}}line3DChart"):
+            sers = line.findall(f"{{{C_NS}}}ser")
+            for i, ser in enumerate(sers):
+                c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
+                sp_pr = ser.find(f"{{{C_NS}}}spPr")
+                if sp_pr is None:
+                    sp_pr = etree.Element(f"{{{C_NS}}}spPr")
+                    ser.insert(min(2, len(ser)), sp_pr)
+                _set_chart_line_fill(sp_pr, c_hex, width=28575)
+                marker = ser.find(f"{{{C_NS}}}marker")
+                if marker is not None:
+                    m_sppr = marker.find(f"{{{C_NS}}}spPr")
+                    if m_sppr is None:
+                        m_sppr = etree.Element(f"{{{C_NS}}}spPr")
+                        marker.append(m_sppr)
+                    _set_chart_solid_fill(m_sppr, c_hex)
+
+        # 2d. Area & Radar charts
+        for area in root.findall(f".//{{{C_NS}}}areaChart") + root.findall(f".//{{{C_NS}}}area3DChart"):
+            sers = area.findall(f"{{{C_NS}}}ser")
+            for i, ser in enumerate(sers):
+                c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
+                sp_pr = ser.find(f"{{{C_NS}}}spPr")
+                if sp_pr is None:
+                    sp_pr = etree.Element(f"{{{C_NS}}}spPr")
+                    ser.insert(min(2, len(ser)), sp_pr)
+                _set_chart_solid_fill(sp_pr, c_hex)
+
+        for radar in root.findall(f".//{{{C_NS}}}radarChart"):
+            sers = radar.findall(f"{{{C_NS}}}ser")
+            for i, ser in enumerate(sers):
+                c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
+                sp_pr = ser.find(f"{{{C_NS}}}spPr")
+                if sp_pr is None:
+                    sp_pr = etree.Element(f"{{{C_NS}}}spPr")
+                    ser.insert(min(2, len(ser)), sp_pr)
+                _set_chart_line_fill(sp_pr, c_hex, width=25400)
+
+    # 3. If SmartArt colors.xml or drawing.xml relied on a light/medium accent1 in source theme,
     # map accent1 -> accent2 (#3EB9C0 Corporate Cyan/Teal in Vorlage) so shapes stay vibrant & readable!
     if "/diagrams/" in pname and old_acc1_lum >= 0.45:
         for sc in root.findall(f".//{{{A_NS}}}schemeClr"):
             if sc.get("val") == "accent1":
                 sc.set("val", "accent2")
 
-    # 3. Map explicit <a:srgbClr> colors (excluding shadow effectLst) into corporate palette
+    # 4. Map explicit <a:srgbClr> colors (excluding shadow effectLst) into corporate palette
     for parent in root.iter():
         ptag = parent.tag.split("}")[-1]
         if ptag in ("solidFill", "gs"):
@@ -1826,7 +2075,7 @@ def clone_part_into_package(old_part, dst_pkg, used_partnames, part_memo, theme_
     return new_part
 
 
-def copy_and_restyle_shape(sh, elem, old_slide, new_slide, theme_map, mapper, used_partnames, part_memo):
+def copy_and_restyle_shape(sh, elem, old_slide, new_slide, theme_map, mapper, used_partnames, part_memo, shape_id_map=None):
     """
     Transfers all rId relationships of elem from old_slide to new_slide without
     any partname or rId collisions, including SmartArt diagramDrawing parts,
@@ -1893,7 +2142,7 @@ def copy_and_restyle_shape(sh, elem, old_slide, new_slide, theme_map, mapper, us
                 if attr_v in rid_map:
                     node.set(attr_k, rid_map[attr_v])
 
-    # Assign unique cNvPr IDs across the slide
+    # Assign unique cNvPr IDs across the slide and record old -> new ID mapping
     existing_ids = set()
     for c in new_slide.shapes._spTree.iter(qn_p("cNvPr")):
         try:
@@ -1902,10 +2151,106 @@ def copy_and_restyle_shape(sh, elem, old_slide, new_slide, theme_map, mapper, us
             pass
     next_id = max(existing_ids | {1}) + 1
     for c in elem.iter(qn_p("cNvPr")):
-        c.set("id", str(next_id))
+        old_id = c.get("id")
+        new_id_str = str(next_id)
+        c.set("id", new_id_str)
+        if shape_id_map is not None:
+            if old_id:
+                shape_id_map[str(old_id)] = new_id_str
+            if sh is not None and getattr(sh, "shape_id", None) is not None:
+                shape_id_map[str(sh.shape_id)] = new_id_str
         next_id += 1
 
     new_slide.shapes._spTree.append(elem)
+
+
+def copy_slide_notes(old_slide, new_slide):
+    """
+    Copies speaker notes (Notizen) from old_slide to new_slide preserving
+    full text, paragraphs, runs, and formatting.
+    """
+    if not getattr(old_slide, "has_notes_slide", False):
+        return
+    try:
+        old_ns = old_slide.notes_slide
+        old_tf = getattr(old_ns, "notes_text_frame", None)
+        if not old_tf or not old_tf.text.strip():
+            return
+        new_ns = new_slide.notes_slide
+        new_tf = new_ns.notes_text_frame
+        new_tf.clear()
+        for p_idx, old_p in enumerate(old_tf.paragraphs):
+            new_p = new_tf.paragraphs[0] if p_idx == 0 else new_tf.add_paragraph()
+            new_p.level = old_p.level
+            if old_p.alignment is not None:
+                new_p.alignment = old_p.alignment
+            for old_r in old_p.runs:
+                new_r = new_p.add_run()
+                new_r.text = old_r.text
+                if old_r.font.bold is not None:
+                    new_r.font.bold = old_r.font.bold
+                if old_r.font.italic is not None:
+                    new_r.font.italic = old_r.font.italic
+                if old_r.font.size is not None:
+                    new_r.font.size = old_r.font.size
+    except Exception:
+        try:
+            if getattr(old_slide, "has_notes_slide", False) and old_slide.notes_slide.notes_text_frame.text:
+                new_slide.notes_slide.notes_text_frame.text = old_slide.notes_slide.notes_text_frame.text
+        except Exception:
+            pass
+
+
+def copy_slide_animations_and_timing(old_slide, new_slide, shape_id_map):
+    """
+    Copies <p:timing> and <p:transition> from old_slide to new_slide,
+    remapping all shape IDs (spid) to the new IDs on new_slide.
+    """
+    old_sld_el = getattr(old_slide, "_element", None)
+    new_sld_el = getattr(new_slide, "_element", None)
+    if old_sld_el is None or new_sld_el is None:
+        return
+
+    # 1. Slide Transition (<p:transition>)
+    old_trans = old_sld_el.find(qn_p("transition"))
+    if old_trans is not None:
+        existing_trans = new_sld_el.find(qn_p("transition"))
+        if existing_trans is not None:
+            new_sld_el.remove(existing_trans)
+        cloned_trans = deepcopy(old_trans)
+        insert_idx = len(new_sld_el)
+        for i, ch in enumerate(new_sld_el):
+            tag = ch.tag.split("}")[-1]
+            if tag in ("timing", "hf", "extLst"):
+                insert_idx = i
+                break
+        new_sld_el.insert(insert_idx, cloned_trans)
+
+    # 2. Slide Animations / Timing (<p:timing>)
+    old_timing = old_sld_el.find(qn_p("timing"))
+    if old_timing is None:
+        return
+
+    cloned_timing = deepcopy(old_timing)
+
+    # Remap shape references (spid) in the timing tree
+    if shape_id_map:
+        for node in cloned_timing.iter():
+            spid = node.get("spid")
+            if spid is not None and str(spid) in shape_id_map:
+                node.set("spid", str(shape_id_map[str(spid)]))
+
+    existing_timing = new_sld_el.find(qn_p("timing"))
+    if existing_timing is not None:
+        new_sld_el.remove(existing_timing)
+
+    insert_idx = len(new_sld_el)
+    for i, ch in enumerate(new_sld_el):
+        tag = ch.tag.split("}")[-1]
+        if tag in ("hf", "extLst"):
+            insert_idx = i
+            break
+    new_sld_el.insert(insert_idx, cloned_timing)
 
 
 def sanitize_pptx_package(buf, slide_count):
@@ -2019,16 +2364,17 @@ def detect_slide_heading_shape(shapes, exclude_shapes=None, old_w=None, old_h=No
             except Exception:
                 pass
 
+        eff_x, eff_y, eff_w, eff_h = get_shape_effective_geometry(sh, None)
         # Skip Vorlage top-strip Kapitel placeholder (idx=12 at y < 0.65") when searching for main Title
-        if ph_idx == 12 and (sh.top or 0) < int(0.65 * 914400):
+        if ph_idx == 12 and eff_y < int(0.65 * 914400):
             continue
 
         # Skip tall multi-paragraph body/quote boxes that merely start near the top
-        if not is_title_ph and (sh.height or 0) > 0.28 * ref_h:
+        if not is_title_ph and eff_h > 0.28 * ref_h:
             continue
 
-        rel_top = (sh.top or 0) / ref_h
-        rel_left = (sh.left or 0) / ref_w
+        rel_top = eff_y / ref_h
+        rel_left = eff_x / ref_w
         score = 0
         if rel_top < 0.16:
             score += 45
@@ -2111,30 +2457,7 @@ def extract_slide_header_components(old_slide, source_shapes, old_w, old_h, repe
             continue
         if shape_has_visual_fill(sh._element):
             continue
-        eff_y = sh.top
-        eff_x = sh.left
-        eff_h = sh.height
-        if (eff_y is None or eff_x is None) and sh.is_placeholder:
-            try:
-                inh_els = find_inherited_placeholder(
-                    old_slide,
-                    sh.placeholder_format.idx,
-                    sh.placeholder_format.type,
-                )
-                for inh in inh_els:
-                    off = inh.find(f".//{{{A_NS}}}off")
-                    ext = inh.find(f".//{{{A_NS}}}ext")
-                    if off is not None and eff_y is None:
-                        eff_y = int(off.get("y"))
-                    if off is not None and eff_x is None:
-                        eff_x = int(off.get("x"))
-                    if ext is not None and eff_h is None:
-                        eff_h = int(ext.get("cy"))
-            except Exception:
-                pass
-        eff_y = eff_y if eff_y is not None else 0
-        eff_x = eff_x if eff_x is not None else 0
-        eff_h = eff_h if eff_h is not None else 0
+        eff_x, eff_y, eff_w, eff_h = get_shape_effective_geometry(sh, old_slide)
 
         rel_top = eff_y / old_h
         rel_left = eff_x / old_w
@@ -2298,7 +2621,8 @@ def extract_slide_header_components(old_slide, source_shapes, old_w, old_h, repe
         # Fallback for centered dividers / non-standard headings
         heading_sh = detect_slide_heading_shape(source_shapes, old_w=old_w, old_h=old_h)
         if heading_sh is not None and heading_sh._element.tag.split("}")[-1] == "sp":
-            rel_top = (heading_sh.top or 0) / old_h
+            eff_hx, eff_hy, eff_hw, eff_hh = get_shape_effective_geometry(heading_sh, old_slide)
+            rel_top = eff_hy / old_h
             if rel_top <= 0.18 and not shape_has_visual_fill(heading_sh._element):
                 top_title_sh = heading_sh
                 consumed_shapes = [heading_sh]
@@ -2336,7 +2660,20 @@ def get_shape_max_font_sz(sh, old_slide):
                 max_sz = max(max_sz, int(rpr.get("sz")))
             except ValueError:
                 pass
-    if max_sz == 0 and sh.is_placeholder:
+    if max_sz == 0 and getattr(sh, "has_text_frame", False) and sh.text_frame:
+        for p in sh.text_frame.paragraphs:
+            if p.font.size:
+                try:
+                    max_sz = max(max_sz, int(p.font.size.pt * 100))
+                except Exception:
+                    pass
+            for r in p.runs:
+                if r.font.size:
+                    try:
+                        max_sz = max(max_sz, int(r.font.size.pt * 100))
+                    except Exception:
+                        pass
+    if max_sz == 0 and getattr(sh, "is_placeholder", False):
         ph_idx = None
         ph_type = None
         is_title_ph = False
@@ -2347,7 +2684,8 @@ def get_shape_max_font_sz(sh, old_slide):
         except Exception:
             pass
         inh_els = find_inherited_placeholder(old_slide, ph_idx, ph_type)
-        lvl_props = extract_inherited_level_props(inh_els, is_title_ph=is_title_ph)
+        slide_m = getattr(getattr(old_slide, "slide_layout", None), "slide_master", None)
+        lvl_props = extract_inherited_level_props(inh_els, is_title_ph=is_title_ph, slide_master=slide_m)
         if lvl_props.get(0, {}).get("sz"):
             try:
                 max_sz = int(lvl_props[0]["sz"])
@@ -3407,6 +3745,8 @@ def build_arsipa_presentation(template_file, user_file):
             cover_slide = output_prs.slides[0] if keep_template_slide_1 else output_prs.slides.add_slide(cover_layout)
             primary_lines, subtitle_lines = extract_cover_title_lines(old_slide)
             populate_vorlage_cover_slide(cover_slide, primary_lines, subtitle_lines)
+            copy_slide_notes(old_slide, cover_slide)
+            copy_slide_animations_and_timing(old_slide, cover_slide, {})
             full_cover_title = " — ".join(primary_lines + subtitle_lines)
             processed_slides.append({
                 "index": idx,
@@ -3417,6 +3757,7 @@ def build_arsipa_presentation(template_file, user_file):
             continue
 
         new_slide = output_prs.slides.add_slide(canvas_layout)
+        shape_id_map = {}
 
         source_shapes = list(old_slide.shapes)
         hdr_info = extract_slide_header_components(old_slide, source_shapes, old_w, old_h, repeated_header_kickers)
@@ -3442,6 +3783,35 @@ def build_arsipa_presentation(template_file, user_file):
                 continue
             try:
                 new_slide.shapes._spTree.remove(ph._element)
+            except Exception:
+                pass
+
+        if use_vorlage_header and ph_titel_el is not None and hdr_info["top_title_sh"] is not None:
+            t_cnv = ph_titel_el.find(f".//{{{P_NS}}}cNvPr")
+            if t_cnv is not None and t_cnv.get("id"):
+                shape_id_map[str(hdr_info["top_title_sh"].shape_id)] = t_cnv.get("id")
+        if use_vorlage_header and ph_kapitel_el is not None and hdr_info["kapitel_sh"] is not None:
+            k_cnv = ph_kapitel_el.find(f".//{{{P_NS}}}cNvPr")
+            if k_cnv is not None and k_cnv.get("id"):
+                shape_id_map[str(hdr_info["kapitel_sh"].shape_id)] = k_cnv.get("id")
+
+        is_centered_slide = is_centered_divider_slide(old_slide, old_w, old_h, use_vorlage_header=use_vorlage_header)
+
+        if not use_vorlage_header:
+            new_slide._element.set("showMasterSp", "0")
+            # Extra guarantee against orphaned left cyan bar (Rectangle 3) on non-header slides
+            try:
+                patch_bg_hex = IFG_WHITE
+                patch_sp = parse_xml(
+                    f'<p:sp xmlns:p="{P_NS}" xmlns:a="{A_NS}">'
+                    f'<p:nvSpPr><p:cNvPr id="99999" name="HeaderBarCover"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr/></p:nvSpPr>'
+                    f'<p:spPr><a:xfrm><a:off x="75000" y="520000"/><a:ext cx="140000" cy="320000"/></a:xfrm>'
+                    f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+                    f'<a:solidFill><a:srgbClr val="{patch_bg_hex}"/></a:solidFill>'
+                    f'<a:ln><a:noFill/></a:ln></p:spPr>'
+                    f'</p:sp>'
+                )
+                new_slide.shapes._spTree.append(patch_sp)
             except Exception:
                 pass
 
@@ -3491,7 +3861,8 @@ def build_arsipa_presentation(template_file, user_file):
                 theme_map=theme_map,
                 mapper=mapper,
                 used_partnames=used_partnames,
-                part_memo=part_memo
+                part_memo=part_memo,
+                shape_id_map=shape_id_map
             )
             copied_count += 1
 
@@ -3543,18 +3914,24 @@ def build_arsipa_presentation(template_file, user_file):
 
             elem = deepcopy(sh._element)
 
+            eff_x, eff_y, eff_w, eff_h = get_shape_effective_geometry(sh, old_slide)
+            rel_sh_top = eff_y / old_h
+            rel_sh_left = eff_x / old_w
+
             is_top_left_hdr = (
                 sh is heading_sh
-                and (sh.top or 0) / old_h <= 0.18
-                and (sh.left or 0) / old_w <= 0.25
+                and rel_sh_top <= 0.18
+                and rel_sh_left <= 0.25
+                and not is_centered_slide
             )
-            hdr_sz_mode = "title" if (sh is heading_sh and (sh.top or 0) / old_h <= 0.18) else None
+            hdr_sz_mode = "title" if (sh is heading_sh and rel_sh_top <= 0.18 and not is_centered_slide) else None
 
             bbox = materialize_placeholder_and_transform(
                 sh, elem, old_slide,
                 scale=scale, dx=dx, dy=dy,
                 is_top_left_header=is_top_left_hdr,
-                max_header_right=max_header_right
+                max_header_right=max_header_right,
+                is_centered_divider=is_centered_slide
             )
 
             restyle_any_element(
@@ -3563,7 +3940,7 @@ def build_arsipa_presentation(template_file, user_file):
                 mapper=mapper,
                 z_bg_stack=z_bg_stack,
                 default_bg_lum=slide_bg_lum,
-                is_heading_shape=(sh is heading_sh),
+                is_heading_shape=(sh is heading_sh or is_centered_slide),
                 font_scale=scale,
                 header_size_mode=hdr_sz_mode
             )
@@ -3573,7 +3950,8 @@ def build_arsipa_presentation(template_file, user_file):
                 theme_map=theme_map,
                 mapper=mapper,
                 used_partnames=used_partnames,
-                part_memo=part_memo
+                part_memo=part_memo,
+                shape_id_map=shape_id_map
             )
             if sh is heading_sh:
                 heading_elem_on_new = elem
@@ -3603,6 +3981,12 @@ def build_arsipa_presentation(template_file, user_file):
             heading_elem=heading_elem_on_new,
             protected_elems=hdr_elems,
         )
+
+        # Copy speaker notes (Notizen) from old_slide to new_slide
+        copy_slide_notes(old_slide, new_slide)
+
+        # Copy transitions and animations (<p:timing>) with remapped shape IDs
+        copy_slide_animations_and_timing(old_slide, new_slide, shape_id_map)
 
         processed_slides.append({
             "index": idx,

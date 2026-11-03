@@ -14,6 +14,7 @@ import warnings
 import base64
 import colorsys
 import hashlib
+import uuid
 from PIL import Image
 from collections import Counter
 from copy import deepcopy
@@ -316,6 +317,7 @@ R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 C_NS = "http://schemas.openxmlformats.org/drawingml/2006/chart"
 DGM_NS = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
 DSP_NS = "http://schemas.microsoft.com/office/drawing/2008/diagram"
+MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 
 CORPORATE_FONT = "Abadi"
 TITLE_FONT_SZ = "2800"         # Official Vorlage 'Titel' size: 28 pt
@@ -947,7 +949,7 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                         new_txt_hex = IFG_CHARCOAL
 
                 # Ensure <a:solidFill> exists in proper DrawingML schema position inside <a:rPr>
-                for ftag in ("noFill", "solidFill", "gradFill", "pattFill"):
+                for ftag in ("noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill"):
                     old_f = rpr.find(qn_a(ftag))
                     if old_f is not None:
                         rpr.remove(old_f)
@@ -1321,7 +1323,12 @@ def ensure_explicit_xfrm(elem, x, y, cx, cy):
         sp_pr = elem.find(qn_p("spPr"))
         if sp_pr is None:
             sp_pr = etree.Element(qn_p("spPr"))
-            elem.insert(1, sp_pr)
+            if tag == "pic":
+                bf = elem.find(qn_p("blipFill"))
+                ins_pos = (list(elem).index(bf) + 1) if bf is not None else min(2, len(elem))
+                elem.insert(ins_pos, sp_pr)
+            else:
+                elem.insert(1, sp_pr)
         xfrm = sp_pr.find(qn_a("xfrm"))
         if xfrm is None:
             xfrm = etree.Element(qn_a("xfrm"))
@@ -1840,28 +1847,89 @@ def restyle_any_element(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, i
 # ----------------- 5. SMARTART, CHART & RELATIONSHIP SAFE CLONER -----------------
 
 def _set_chart_solid_fill(sp_pr, hex_val):
-    for ftag in ("noFill", "solidFill", "gradFill", "blipFill", "pattFill"):
+    for ftag in ("noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill"):
         old = sp_pr.find(qn_a(ftag))
         if old is not None:
             sp_pr.remove(old)
-    sf = etree.SubElement(sp_pr, qn_a("solidFill"))
+    sf = etree.Element(qn_a("solidFill"))
     clr = etree.SubElement(sf, qn_a("srgbClr"))
     clr.set("val", hex_val)
+    insert_sppr_child(sp_pr, sf, slot_rank=2)
 
 
 def _set_chart_line_fill(sp_pr, hex_val, width=None):
     ln = sp_pr.find(qn_a("ln"))
     if ln is None:
-        ln = etree.SubElement(sp_pr, qn_a("ln"))
+        ln = etree.Element(qn_a("ln"))
+        insert_sppr_child(sp_pr, ln, slot_rank=3)
     if width:
         ln.set("w", str(width))
     for ftag in ("noFill", "solidFill", "gradFill", "pattFill"):
         old = ln.find(qn_a(ftag))
         if old is not None:
             ln.remove(old)
-    sf = etree.SubElement(ln, qn_a("solidFill"))
+    sf = etree.Element(qn_a("solidFill"))
     clr = etree.SubElement(sf, qn_a("srgbClr"))
     clr.set("val", hex_val)
+    ln.insert(0, sf)
+
+
+def _get_or_insert_ser_sppr(ser):
+    sp_pr = ser.find(f"{{{C_NS}}}spPr")
+    if sp_pr is not None:
+        return sp_pr
+    sp_pr = etree.Element(f"{{{C_NS}}}spPr")
+    idx_pos = 0
+    for i, child in enumerate(ser):
+        local_tag = child.tag.split("}")[-1]
+        if local_tag in ("idx", "order", "tx"):
+            idx_pos = i + 1
+        elif local_tag in ("spPr", "invertIfNegative", "pictureOptions", "dPt", "dLbls", "trendline", "errBars", "cat", "val", "xVal", "yVal", "smooth", "extLst", "explosion", "marker"):
+            break
+    ser.insert(idx_pos, sp_pr)
+    return sp_pr
+
+
+def _get_or_insert_dpt_sppr(dpt):
+    sp_pr = dpt.find(f"{{{C_NS}}}spPr")
+    if sp_pr is not None:
+        return sp_pr
+    sp_pr = etree.Element(f"{{{C_NS}}}spPr")
+    idx_pos = 0
+    for i, child in enumerate(dpt):
+        local_tag = child.tag.split("}")[-1]
+        if local_tag in ("idx", "invertIfNegative", "marker", "bubble3D", "explosion"):
+            idx_pos = i + 1
+        elif local_tag in ("spPr", "pictureOptions", "extLst"):
+            break
+    dpt.insert(idx_pos, sp_pr)
+    return sp_pr
+
+
+def _get_or_insert_marker_sppr(marker):
+    sp_pr = marker.find(f"{{{C_NS}}}spPr")
+    if sp_pr is not None:
+        return sp_pr
+    sp_pr = etree.Element(f"{{{C_NS}}}spPr")
+    idx_pos = 0
+    for i, child in enumerate(marker):
+        local_tag = child.tag.split("}")[-1]
+        if local_tag in ("symbol", "size"):
+            idx_pos = i + 1
+        elif local_tag in ("spPr", "extLst"):
+            break
+    marker.insert(idx_pos, sp_pr)
+    return sp_pr
+
+
+def _insert_pie_dpt(ser, dpt):
+    idx_pos = len(ser)
+    for i, child in enumerate(ser):
+        local_tag = child.tag.split("}")[-1]
+        if local_tag in ("dLbls", "cat", "val", "extLst"):
+            idx_pos = i
+            break
+    ser.insert(idx_pos, dpt)
 
 
 def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
@@ -1883,6 +1951,17 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
 
     # 2. Dedicated Chart Styler (Pie, Bar/Histogram, Line, Scatter, Area, Radar)
     if "/charts/" in pname:
+        # Remap any negative axId / crossAx to positive 31-bit integers
+        ax_map = {}
+        for ax in root.iter():
+            local = ax.tag.split("}")[-1]
+            if local in ("axId", "crossAx"):
+                v = ax.get("val")
+                if v and v.startswith("-"):
+                    if v not in ax_map:
+                        ax_map[v] = str(abs(int(v)) & 0x7FFFFFFF)
+                    ax.set("val", ax_map[v])
+
         # 2a. Pie & Doughnut charts: apply official Arsipa slice colors with white dividers
         for pie in root.findall(f".//{{{C_NS}}}pieChart") + root.findall(f".//{{{C_NS}}}doughnutChart") + root.findall(f".//{{{C_NS}}}pie3DChart"):
             for ser in pie.findall(f"{{{C_NS}}}ser"):
@@ -1890,10 +1969,7 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
                 if dpts:
                     for i, dpt in enumerate(dpts):
                         c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
-                        sp_pr = dpt.find(f"{{{C_NS}}}spPr")
-                        if sp_pr is None:
-                            sp_pr = etree.Element(f"{{{C_NS}}}spPr")
-                            dpt.append(sp_pr)
+                        sp_pr = _get_or_insert_dpt_sppr(dpt)
                         _set_chart_solid_fill(sp_pr, c_hex)
                         _set_chart_line_fill(sp_pr, "FFFFFF", width=19050)
                 else:
@@ -1905,20 +1981,17 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
                             dpt = etree.Element(f"{{{C_NS}}}dPt")
                             idx_el = etree.SubElement(dpt, f"{{{C_NS}}}idx")
                             idx_el.set("val", str(i))
-                            sp_pr = etree.SubElement(dpt, f"{{{C_NS}}}spPr")
+                            sp_pr = _get_or_insert_dpt_sppr(dpt)
                             _set_chart_solid_fill(sp_pr, c_hex)
                             _set_chart_line_fill(sp_pr, "FFFFFF", width=19050)
-                            ser.append(dpt)
+                            _insert_pie_dpt(ser, dpt)
 
         # 2b. Bar & Column charts (Single series -> Deep Navy #012641; Multi series -> follows palette)
         for bar in root.findall(f".//{{{C_NS}}}barChart") + root.findall(f".//{{{C_NS}}}bar3DChart"):
             sers = bar.findall(f"{{{C_NS}}}ser")
             for i, ser in enumerate(sers):
                 c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
-                sp_pr = ser.find(f"{{{C_NS}}}spPr")
-                if sp_pr is None:
-                    sp_pr = etree.Element(f"{{{C_NS}}}spPr")
-                    ser.insert(min(2, len(ser)), sp_pr)
+                sp_pr = _get_or_insert_ser_sppr(ser)
                 _set_chart_solid_fill(sp_pr, c_hex)
 
         # 2c. Line & Scatter charts: apply official Arsipa line & marker colors
@@ -1926,17 +1999,11 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
             sers = line.findall(f"{{{C_NS}}}ser")
             for i, ser in enumerate(sers):
                 c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
-                sp_pr = ser.find(f"{{{C_NS}}}spPr")
-                if sp_pr is None:
-                    sp_pr = etree.Element(f"{{{C_NS}}}spPr")
-                    ser.insert(min(2, len(ser)), sp_pr)
+                sp_pr = _get_or_insert_ser_sppr(ser)
                 _set_chart_line_fill(sp_pr, c_hex, width=28575)
                 marker = ser.find(f"{{{C_NS}}}marker")
                 if marker is not None:
-                    m_sppr = marker.find(f"{{{C_NS}}}spPr")
-                    if m_sppr is None:
-                        m_sppr = etree.Element(f"{{{C_NS}}}spPr")
-                        marker.append(m_sppr)
+                    m_sppr = _get_or_insert_marker_sppr(marker)
                     _set_chart_solid_fill(m_sppr, c_hex)
 
         # 2d. Area & Radar charts
@@ -1944,20 +2011,14 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
             sers = area.findall(f"{{{C_NS}}}ser")
             for i, ser in enumerate(sers):
                 c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
-                sp_pr = ser.find(f"{{{C_NS}}}spPr")
-                if sp_pr is None:
-                    sp_pr = etree.Element(f"{{{C_NS}}}spPr")
-                    ser.insert(min(2, len(ser)), sp_pr)
+                sp_pr = _get_or_insert_ser_sppr(ser)
                 _set_chart_solid_fill(sp_pr, c_hex)
 
         for radar in root.findall(f".//{{{C_NS}}}radarChart"):
             sers = radar.findall(f"{{{C_NS}}}ser")
             for i, ser in enumerate(sers):
                 c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
-                sp_pr = ser.find(f"{{{C_NS}}}spPr")
-                if sp_pr is None:
-                    sp_pr = etree.Element(f"{{{C_NS}}}spPr")
-                    ser.insert(min(2, len(ser)), sp_pr)
+                sp_pr = _get_or_insert_ser_sppr(ser)
                 _set_chart_line_fill(sp_pr, c_hex, width=25400)
 
     # 3. If SmartArt colors.xml or drawing.xml relied on a light/medium accent1 in source theme,
@@ -2065,7 +2126,10 @@ def clone_part_into_package(old_part, dst_pkg, used_partnames, part_memo, theme_
         try:
             sub_root = etree.fromstring(new_part._blob)
             for node in sub_root.iter():
+                is_data_model_ext = node.tag.split("}")[-1] == "dataModelExt"
                 for attr_k, attr_v in list(node.attrib.items()):
+                    if is_data_model_ext and attr_k == "relId":
+                        continue
                     if attr_v in sub_rid_map:
                         node.set(attr_k, sub_rid_map[attr_v])
             new_part._blob = etree.tostring(sub_root, xml_declaration=True, encoding="UTF-8", standalone=True)
@@ -2075,13 +2139,165 @@ def clone_part_into_package(old_part, dst_pkg, used_partnames, part_memo, theme_
     return new_part
 
 
-def copy_and_restyle_shape(sh, elem, old_slide, new_slide, theme_map, mapper, used_partnames, part_memo, shape_id_map=None):
+def clean_slide_addin_and_ole_shapes(slide_el):
+    """
+    Strips corrupting think-cell OLE objects, VML-less OLE objects, and custom data lists
+    from slide XML so PowerPoint opens cleanly without repair popups.
+    """
+    sp_tree = slide_el.find(f"{{{P_NS}}}cSld/{{{P_NS}}}spTree")
+    if sp_tree is None:
+        return
+
+    # 1. Remove all <p:custDataLst> elements from all shapes
+    for cust in list(sp_tree.iter(qn_p("custDataLst"))):
+        p = cust.getparent()
+        if p is not None:
+            p.remove(cust)
+
+    # 2. Walk shapes (including inside grpSp) and handle think-cell & OLE AlternateContent
+    def _clean_container(container):
+        for child in list(container):
+            tag = child.tag.split("}")[-1]
+            if tag == "grpSp":
+                _clean_container(child)
+                continue
+
+            # Check if think-cell shape
+            cnv = child.find(f".//{{{P_NS}}}cNvPr")
+            cname = (cnv.get("name") if cnv is not None else "") or ""
+            if "think-cell" in cname.lower():
+                container.remove(child)
+                continue
+
+            # Check if contains TCLayout OLE object
+            ole = child.find(f".//{{{P_NS}}}oleObj")
+            if ole is not None:
+                prog_id = (ole.get("progId") or "").lower()
+                if "tclayout" in prog_id or "thinkcell" in prog_id:
+                    container.remove(child)
+                    continue
+
+            # Check <mc:AlternateContent>
+            ac_list = child.findall(f".//{{{MC_NS}}}AlternateContent")
+            if tag == "AlternateContent":
+                ac_list = [child]
+
+            for ac in ac_list:
+                choice = ac.find(f"{{{MC_NS}}}Choice")
+                ole_obj = choice.find(f".//{{{P_NS}}}oleObj") if choice is not None else None
+                if ole_obj is not None:
+                    # An OLE object inside AlternateContent
+                    fb = ac.find(f"{{{MC_NS}}}Fallback")
+                    fb_pic = fb.find(f".//{{{P_NS}}}pic") if fb is not None else None
+                    if fb_pic is not None:
+                        # Extract the fallback picture to replace the OLE object cleanly
+                        if child is ac:
+                            idx_in_parent = list(container).index(ac)
+                            container.remove(ac)
+                            container.insert(idx_in_parent, fb_pic)
+                        else:
+                            gf_xfrm = child.find(f".//{{{A_NS}}}xfrm")
+                            if gf_xfrm is not None:
+                                pic_sp_pr = fb_pic.find(f"{{{P_NS}}}spPr")
+                                if pic_sp_pr is None:
+                                    pic_sp_pr = etree.Element(f"{{{P_NS}}}spPr")
+                                    fb_pic.append(pic_sp_pr)
+                                pic_xfrm = pic_sp_pr.find(f"{{{A_NS}}}xfrm")
+                                if pic_xfrm is not None:
+                                    pic_sp_pr.remove(pic_xfrm)
+                                pic_sp_pr.insert(0, deepcopy(gf_xfrm))
+                            idx_in_parent = list(container).index(child)
+                            container.remove(child)
+                            container.insert(idx_in_parent, fb_pic)
+                        break
+                    else:
+                        if child is ac:
+                            container.remove(ac)
+                        else:
+                            container.remove(child)
+                        break
+
+    _clean_container(sp_tree)
+
+
+def assign_clean_slide_shape_ids(slide_el):
+    """
+    Assigns strictly unique, consecutive cNvPr IDs to all shapes on slide_el:
+    - Root spTree nvGrpSpPr gets id="1"
+    - Top-level and grouped shapes get 2, 3, 4...
+    - For <mc:AlternateContent>, Choice and Fallback cNvPr IDs are kept identical
+    - Replaces duplicate a16:creationId attributes with unique GUIDs
+    """
+    sp_tree = slide_el.find(f"{{{P_NS}}}cSld/{{{P_NS}}}spTree")
+    if sp_tree is None:
+        return
+
+    # Root group ID = 1
+    root_nv = sp_tree.find(f"{{{P_NS}}}nvGrpSpPr/{{{P_NS}}}cNvPr")
+    if root_nv is not None:
+        root_nv.set("id", "1")
+
+    cur_id = 2
+    seen_creation_ids = set()
+
+    for child in sp_tree.iter():
+        if not isinstance(child.tag, str):
+            continue
+        # Check a16:creationId
+        for k in list(child.attrib.keys()):
+            if k.endswith("}creationId"):
+                cid = child.attrib[k]
+                if cid in seen_creation_ids:
+                    child.attrib[k] = "{" + str(uuid.uuid4()).upper() + "}"
+                else:
+                    seen_creation_ids.add(cid)
+
+        ltag = child.tag.split("}")[-1]
+        if ltag in ("sp", "pic", "grpSp", "cxnSp", "graphicFrame", "contentPart"):
+            if child is sp_tree:
+                continue
+            anc = [a.tag.split("}")[-1] for a in child.iterancestors()]
+            if "Fallback" in anc:
+                continue
+            nv = child[0] if len(child) > 0 else None
+            cnv = nv.find(qn_p("cNvPr")) if nv is not None else None
+            if cnv is not None:
+                new_id_str = str(cur_id)
+                cnv.set("id", new_id_str)
+                cur_id += 1
+
+                # If child is in Choice of AlternateContent, synchronize Fallback counterpart
+                parent = child.getparent()
+                if parent is not None and parent.tag.split("}")[-1] == "Choice":
+                    ac = parent.getparent()
+                    if ac is not None:
+                        fb = ac.find(f"{{{MC_NS}}}Fallback")
+                        if fb is not None:
+                            fb_cnv = fb.find(f".//{{{P_NS}}}cNvPr")
+                            if fb_cnv is not None:
+                                fb_cnv.set("id", new_id_str)
+
+
+def copy_and_restyle_shape(
+    sh, elem, old_slide, new_slide, theme_map, mapper,
+    used_partnames, part_memo, elem_id_tracker=None, pending_slide_jumps=None, shape_id_map=None
+):
     """
     Transfers all rId relationships of elem from old_slide to new_slide without
     any partname or rId collisions, including SmartArt diagramDrawing parts,
     and assigns unique cNvPr IDs on new_slide.
     """
     dst_pkg = new_slide.part.package
+
+    # If caller passed shape_id_map as list, treat as elem_id_tracker
+    if elem_id_tracker is None and isinstance(shape_id_map, list):
+        elem_id_tracker = shape_id_map
+
+    # Strip <p:custDataLst> before collecting referenced rids
+    for cd in list(elem.iter(qn_p("custDataLst"))):
+        p = cd.getparent()
+        if p is not None:
+            p.remove(cd)
 
     # Collect all rId values referenced in attributes of elem
     referenced_rids = set()
@@ -2090,13 +2306,35 @@ def copy_and_restyle_shape(sh, elem, old_slide, new_slide, theme_map, mapper, us
             if re.match(r"^rId\d+$", attr_v):
                 referenced_rids.add(attr_v)
 
-    # SmartArt special handling: data.xml contains <dsp:dataModelExt relId="rIdX"/>
-    # referencing a diagramDrawing rel on the SLIDE!
+    forbidden_reltypes = (
+        "/slideLayout", "/slideMaster", "/notesSlide", "/notesMaster",
+        "/comments", "/tags", "/vmlDrawing"
+    )
+
     rid_map = {}
     for rid in sorted(referenced_rids):
         if rid not in old_slide.part.rels:
             continue
         old_rel = old_slide.part.rels[rid]
+
+        # Check internal slide jump hyperlinks
+        if not old_rel.is_external and old_rel.reltype.endswith("/slide"):
+            if pending_slide_jumps is not None:
+                for node in elem.iter():
+                    for attr_k, attr_v in list(node.attrib.items()):
+                        if attr_v == rid:
+                            pending_slide_jumps.append((node, attr_k, new_slide, old_rel.target_part.partname))
+                            del node.attrib[attr_k]
+            continue
+
+        # Skip forbidden template or slide-level relationships
+        if any(old_rel.reltype.endswith(frt) for frt in forbidden_reltypes):
+            for node in elem.iter():
+                for attr_k, attr_v in list(node.attrib.items()):
+                    if attr_v == rid:
+                        del node.attrib[attr_k]
+            continue
+
         if old_rel.is_external:
             new_rid = new_slide.part.relate_to(old_rel.target_ref, old_rel.reltype, is_external=True)
             rid_map[rid] = new_rid
@@ -2127,7 +2365,6 @@ def copy_and_restyle_shape(sh, elem, old_slide, new_slide, theme_map, mapper, us
             new_rid = new_slide.part.relate_to(cloned_data, old_rel.reltype)
             rid_map[rid] = new_rid
         else:
-            # For diagram layout/quickStyle/colors, clone per-diagram instance cleanly
             memo_to_use = {} if "/diagrams/" in str(getattr(old_rel.target_part, "partname", "")) else part_memo
             cloned_target = clone_part_into_package(
                 old_rel.target_part, dst_pkg, used_partnames, memo_to_use, theme_map, mapper
@@ -2142,24 +2379,16 @@ def copy_and_restyle_shape(sh, elem, old_slide, new_slide, theme_map, mapper, us
                 if attr_v in rid_map:
                     node.set(attr_k, rid_map[attr_v])
 
-    # Assign unique cNvPr IDs across the slide and record old -> new ID mapping
-    existing_ids = set()
-    for c in new_slide.shapes._spTree.iter(qn_p("cNvPr")):
-        try:
-            existing_ids.add(int(c.get("id")))
-        except (TypeError, ValueError):
-            pass
-    next_id = max(existing_ids | {1}) + 1
-    for c in elem.iter(qn_p("cNvPr")):
-        old_id = c.get("id")
-        new_id_str = str(next_id)
-        c.set("id", new_id_str)
-        if shape_id_map is not None:
+    # Record element identity tracking for shape_id_map
+    if elem_id_tracker is not None:
+        for c in elem.iter(qn_p("cNvPr")):
+            old_id = c.get("id")
             if old_id:
-                shape_id_map[str(old_id)] = new_id_str
-            if sh is not None and getattr(sh, "shape_id", None) is not None:
-                shape_id_map[str(sh.shape_id)] = new_id_str
-        next_id += 1
+                elem_id_tracker.append((str(old_id), c))
+        if sh is not None and getattr(sh, "shape_id", None) is not None:
+            main_cnv = elem.find(f".//{{{P_NS}}}cNvPr")
+            if main_cnv is not None:
+                elem_id_tracker.append((str(sh.shape_id), main_cnv))
 
     new_slide.shapes._spTree.append(elem)
 
@@ -2167,7 +2396,7 @@ def copy_and_restyle_shape(sh, elem, old_slide, new_slide, theme_map, mapper, us
 def copy_slide_notes(old_slide, new_slide):
     """
     Copies speaker notes (Notizen) from old_slide to new_slide preserving
-    full text, paragraphs, runs, and formatting.
+    full text, paragraphs, runs, and formatting, stripping illegal XML characters.
     """
     if not getattr(old_slide, "has_notes_slide", False):
         return
@@ -2179,14 +2408,18 @@ def copy_slide_notes(old_slide, new_slide):
         new_ns = new_slide.notes_slide
         new_tf = new_ns.notes_text_frame
         new_tf.clear()
+        ctrl_char_re = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
         for p_idx, old_p in enumerate(old_tf.paragraphs):
             new_p = new_tf.paragraphs[0] if p_idx == 0 else new_tf.add_paragraph()
             new_p.level = old_p.level
             if old_p.alignment is not None:
                 new_p.alignment = old_p.alignment
             for old_r in old_p.runs:
+                clean_text = ctrl_char_re.sub('', old_r.text or '')
+                if not clean_text and old_r.text:
+                    continue
                 new_r = new_p.add_run()
-                new_r.text = old_r.text
+                new_r.text = clean_text
                 if old_r.font.bold is not None:
                     new_r.font.bold = old_r.font.bold
                 if old_r.font.italic is not None:
@@ -2196,7 +2429,8 @@ def copy_slide_notes(old_slide, new_slide):
     except Exception:
         try:
             if getattr(old_slide, "has_notes_slide", False) and old_slide.notes_slide.notes_text_frame.text:
-                new_slide.notes_slide.notes_text_frame.text = old_slide.notes_slide.notes_text_frame.text
+                clean_raw = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', old_slide.notes_slide.notes_text_frame.text)
+                new_slide.notes_slide.notes_text_frame.text = clean_raw
         except Exception:
             pass
 
@@ -2204,9 +2438,9 @@ def copy_slide_notes(old_slide, new_slide):
 def copy_slide_animations_and_timing(old_slide, new_slide, shape_id_map):
     """
     Copies <p:timing> and <p:transition> from old_slide to new_slide,
-    remapping shape IDs (spid) and safely pruning orphaned animations
-    targeting shapes that do not exist on new_slide to prevent PowerPoint
-    repair warnings.
+    remapping shape IDs (spid) strictly and safely pruning orphaned animations
+    targeting shapes that do not exist or lack required elements (e.g. animating
+    paragraphs on a picture or connector) to prevent PowerPoint repair warnings.
     """
     old_sld_el = getattr(old_slide, "_element", None)
     new_sld_el = getattr(new_slide, "_element", None)
@@ -2217,7 +2451,6 @@ def copy_slide_animations_and_timing(old_slide, new_slide, shape_id_map):
     old_trans = old_sld_el.find(qn_p("transition"))
     if old_trans is not None:
         cloned_trans = deepcopy(old_trans)
-        # Strip any dangling sound effect references (sndAc with r:embed)
         for snd in list(cloned_trans.iter(qn_p("sndAc"))):
             p = snd.getparent()
             if p is not None:
@@ -2225,7 +2458,6 @@ def copy_slide_animations_and_timing(old_slide, new_slide, shape_id_map):
         existing_trans = new_sld_el.find(qn_p("transition"))
         if existing_trans is not None:
             new_sld_el.remove(existing_trans)
-        # Sequence: cSld -> clrMapOvr -> transition -> timing -> extLst
         insert_idx = len(new_sld_el)
         for i, ch in enumerate(new_sld_el):
             tag = ch.tag.split("}")[-1]
@@ -2239,13 +2471,6 @@ def copy_slide_animations_and_timing(old_slide, new_slide, shape_id_map):
     if old_timing is None:
         return
 
-    # Collect all valid shape IDs present on new_slide
-    valid_slide_spids = set()
-    for cnv in new_sld_el.iter(qn_p("cNvPr")):
-        sid = cnv.get("id")
-        if sid:
-            valid_slide_spids.add(str(sid))
-
     cloned_timing = deepcopy(old_timing)
 
     # Strip any media/audio nodes referencing external or missing relationships
@@ -2257,44 +2482,192 @@ def copy_slide_animations_and_timing(old_slide, new_slide, shape_id_map):
                     if p is not None:
                         p.remove(el)
 
-    # Remap shape references (spid) strictly (never remap TimeNode IDs!)
-    if shape_id_map:
-        for node in cloned_timing.iter():
-            spid = node.get("spid")
-            if spid is not None and str(spid) in shape_id_map:
+    # 2a. Remap shape references (spid) strictly
+    # Any old spid NOT in shape_id_map is set to "__INVALID__" so it never collides!
+    for node in cloned_timing.iter():
+        spid = node.get("spid")
+        if spid is not None:
+            if shape_id_map and str(spid) in shape_id_map:
                 node.set("spid", str(shape_id_map[str(spid)]))
+            else:
+                node.set("spid", "__INVALID__")
 
-    # Prune orphaned paragraph build list items (<p:bldP>) targeting non-existent shapes
+    # Map drawable shapes on new_slide (excluding root nvGrpSpPr of spTree)
+    drawable_shapes = {}
+    sp_tree = new_sld_el.find(f"{{{P_NS}}}cSld/{{{P_NS}}}spTree")
+    if sp_tree is not None:
+        for el in sp_tree.iter():
+            if not isinstance(el.tag, str):
+                continue
+            ltag = el.tag.split("}")[-1]
+            if ltag in ("sp", "pic", "grpSp", "cxnSp", "graphicFrame", "contentPart"):
+                if el is sp_tree:
+                    continue
+                nv = el[0] if len(el) > 0 else None
+                cnv = nv.find(qn_p("cNvPr")) if nv is not None else None
+                if cnv is not None and cnv.get("id"):
+                    drawable_shapes[cnv.get("id")] = el
+
+    # 2b. Validate paragraph build list (<p:bldP>)
     bld_lst = cloned_timing.find(qn_p("bldLst"))
     if bld_lst is not None:
         for child in list(bld_lst):
             spid = child.get("spid")
-            if spid and spid not in valid_slide_spids:
+            if not spid or spid not in drawable_shapes:
                 bld_lst.remove(child)
+            else:
+                target_el = drawable_shapes[spid]
+                if target_el.find(qn_p("txBody")) is None:
+                    bld_lst.remove(child)
         if len(bld_lst) == 0:
             cloned_timing.remove(bld_lst)
 
-    # Prune orphaned animation nodes targeting non-existent shapes (<p:spTgt>)
-    for sptgt in list(cloned_timing.iter(qn_p("spTgt"))):
+    # 2c. Validate all <p:spTgt> elements
+    # Mark invalid targets and remove their enclosing animation behavior nodes
+    invalid_targets = []
+    for sptgt in cloned_timing.iter(qn_p("spTgt")):
         spid = sptgt.get("spid")
-        if spid and spid not in valid_slide_spids:
-            cur = sptgt
-            to_remove = None
-            while cur is not None and cur != cloned_timing:
-                tag = cur.tag.split("}")[-1]
-                if tag in ("par", "seq", "cTn"):
-                    to_remove = cur
-                    parent = cur.getparent()
-                    if parent is not None and parent.tag.split("}")[-1] == "childTnLst":
-                        break
-                cur = cur.getparent()
-            if to_remove is not None and to_remove.getparent() is not None:
-                to_remove.getparent().remove(to_remove)
+        if not spid or spid not in drawable_shapes:
+            invalid_targets.append(sptgt)
+            continue
 
-    # If all animation targets were pruned or no valid animations remain, do not insert timing
+        target_el = drawable_shapes[spid]
+        ltag = target_el.tag.split("}")[-1]
+
+        # Check <p:txEl>
+        tx_el = sptgt.find(qn_p("txEl"))
+        if tx_el is not None:
+            txbody = target_el.find(qn_p("txBody"))
+            if txbody is None:
+                invalid_targets.append(sptgt)
+                continue
+            paras = txbody.findall(qn_a("p"))
+            num_p = len(paras)
+            prg = tx_el.find(qn_p("pRg"))
+            if prg is not None:
+                try:
+                    st = int(prg.get("st", "0"))
+                    end = int(prg.get("end", "0"))
+                    if st < 0 or st >= num_p or end < 0 or end >= num_p or st > end:
+                        invalid_targets.append(sptgt)
+                        continue
+                except ValueError:
+                    invalid_targets.append(sptgt)
+                    continue
+
+        # Check <p:graphicEl> or <p:oleChartEl>
+        if sptgt.find(qn_p("graphicEl")) is not None or sptgt.find(qn_p("oleChartEl")) is not None:
+            if ltag != "graphicFrame":
+                invalid_targets.append(sptgt)
+                continue
+
+    # Remove enclosing behavior node for invalid targets
+    for sptgt in invalid_targets:
+        cur = sptgt
+        to_remove = None
+        while cur is not None and cur != cloned_timing:
+            tag = cur.tag.split("}")[-1]
+            if tag in ("cBhvr", "anim", "animEffect", "animMotion", "animRot", "animScale", "animClr", "set", "cmd", "audio", "video", "par", "seq", "cTn"):
+                to_remove = cur
+                parent = cur.getparent()
+                if parent is not None and parent.tag.split("}")[-1] in ("childTnLst", "subTnLst", "tnLst"):
+                    break
+            cur = cur.getparent()
+        if to_remove is not None and to_remove.getparent() is not None:
+            to_remove.getparent().remove(to_remove)
+
+    # 2d. Bottom-up fixpoint cleanup loop
+    changed = True
+    anim_leaf_tags = {"anim", "animEffect", "animMotion", "animRot", "animScale", "animClr", "set", "cmd", "audio", "video"}
+    container_tags = {"childTnLst", "subTnLst", "tnLst"}
+    while changed:
+        changed = False
+
+        # Remove cBhvr without tgtEl/spTgt
+        for cbhvr in list(cloned_timing.iter(qn_p("cBhvr"))):
+            spt = cbhvr.find(f".//{qn_p('spTgt')}")
+            if spt is None:
+                p = cbhvr.getparent()
+                if p is not None:
+                    p.remove(cbhvr)
+                    changed = True
+
+        # Remove animation leaf nodes without cBhvr
+        for leaf_tag in anim_leaf_tags:
+            for node in list(cloned_timing.iter(qn_p(leaf_tag))):
+                if node.find(qn_p("cBhvr")) is None:
+                    p = node.getparent()
+                    if p is not None:
+                        p.remove(node)
+                        changed = True
+
+        # Remove empty lists (childTnLst, subTnLst, tnLst)
+        for ctag in container_tags:
+            for clist in list(cloned_timing.iter(qn_p(ctag))):
+                if len(clist) == 0:
+                    p = clist.getparent()
+                    if p is not None:
+                        p.remove(clist)
+                        changed = True
+
+        # Remove cTn that lost its children or has no behaviors (never remove cTn inside cBhvr or cMediaNode!)
+        for ctn in list(cloned_timing.iter(qn_p("cTn"))):
+            p = ctn.getparent()
+            if p is not None and p.tag.split("}")[-1] in ("cBhvr", "cMediaNode"):
+                continue
+            has_child_lst = ctn.find(qn_p("childTnLst")) is not None or ctn.find(qn_p("subTnLst")) is not None
+            has_leaf = any(ctn.find(qn_p(lt)) is not None for lt in anim_leaf_tags)
+            if not has_child_lst and not has_leaf:
+                if p is not None:
+                    p.remove(ctn)
+                    changed = True
+
+        # Remove par, seq, excl without cTn
+        for ptag in ("par", "seq", "excl"):
+            for pnode in list(cloned_timing.iter(qn_p(ptag))):
+                if pnode.find(qn_p("cTn")) is None:
+                    p = pnode.getparent()
+                    if p is not None:
+                        p.remove(pnode)
+                        changed = True
+
+    # 2e. Prune dangling conditions referencing deleted cTn IDs
+    surviving_ctn_ids = {ctn.get("id") for ctn in cloned_timing.iter(qn_p("cTn")) if ctn.get("id")}
+    for cond in list(cloned_timing.iter(qn_p("cond"))):
+        tn_el = cond.find(qn_p("tn"))
+        if tn_el is not None:
+            val = tn_el.get("val")
+            if val and val not in surviving_ctn_ids:
+                p = cond.getparent()
+                if p is not None:
+                    p.remove(cond)
+
+    for cond_lst_tag in ("stCondLst", "endCondLst"):
+        for clst in list(cloned_timing.iter(qn_p(cond_lst_tag))):
+            if len(clst) == 0:
+                p = clst.getparent()
+                if p is not None:
+                    p.remove(clst)
+
+    # 2f. If no valid spTgt remains or tnLst is missing/empty, do not insert timing
     remaining_targets = cloned_timing.findall(f".//{qn_p('spTgt')}")
-    if not remaining_targets:
+    root_tn_lst = cloned_timing.find(qn_p("tnLst"))
+    if not remaining_targets or root_tn_lst is None or len(root_tn_lst) == 0:
         return
+
+    # 2g. Renumber all surviving cTn elements 1..K sequentially and update matching <p:tn val="..."/>
+    ctn_id_remap = {}
+    for idx_ctn, ctn in enumerate(cloned_timing.iter(qn_p("cTn")), start=1):
+        old_cid = ctn.get("id")
+        new_cid = str(idx_ctn)
+        ctn.set("id", new_cid)
+        if old_cid:
+            ctn_id_remap[old_cid] = new_cid
+
+    for tn_ref in cloned_timing.iter(qn_p("tn")):
+        v = tn_ref.get("val")
+        if v in ctn_id_remap:
+            tn_ref.set("val", ctn_id_remap[v])
 
     existing_timing = new_sld_el.find(qn_p("timing"))
     if existing_timing is not None:
@@ -2315,7 +2688,9 @@ def sanitize_pptx_package(buf, slide_count):
     - Deduplicates all ZIP entry filenames (prevents corrupt package warnings)
     - Removes ppt/changesInfos/* co-authoring history pointing at deleted template slides
     - Updates docProps/app.xml slide counts
-    - Strips orphaned content-type overrides and broken relationships
+    - Cleans slide .rels of unused relationships
+    - Prunes unreachable parts via BFS from package root .rels
+    - Ensures proper [Content_Types].xml Defaults for SVG and OLE BIN
     """
     import zipfile
     buf.seek(0)
@@ -2328,11 +2703,64 @@ def sanitize_pptx_package(buf, slide_count):
             seen_names.add(n)
             deduped_names.append(n)
 
+    # 1. Clean slide .rels of unused relationships
+    cleaned_slide_rels = {}
+    for n in deduped_names:
+        if re.match(r"^ppt/slides/_rels/slide\d+\.xml\.rels$", n):
+            slide_n = "ppt/slides/" + posixpath.basename(n)[:-5]
+            if slide_n in deduped_names:
+                slide_xml = src.read(slide_n)
+                used_rids = set(re.findall(r'"(rId\d+)"', slide_xml.decode("utf-8", errors="ignore")))
+
+                rels_xml = src.read(n).decode("utf-8", errors="ignore")
+                r_root = etree.fromstring(rels_xml.encode("utf-8"))
+                for rel in list(r_root):
+                    rid = rel.get("Id")
+                    rtype = rel.get("Type", "")
+                    if rtype.endswith("/slideLayout") or rtype.endswith("/notesSlide"):
+                        continue
+                    if rid not in used_rids:
+                        r_root.remove(rel)
+                cleaned_slide_rels[n] = etree.tostring(r_root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+    # 2. Drop revision info, changesInfos, trash
     drop = {
         n for n in deduped_names
         if n.startswith("ppt/changesInfos/") or n.startswith("ppt/revisionInfo") or n.startswith("[trash]/")
     }
-    keep = [n for n in deduped_names if n not in drop]
+
+    # 3. BFS Reachability from root _rels/.rels
+    rels_map = {}
+    for n in deduped_names:
+        if n.endswith(".rels"):
+            src_dir = posixpath.dirname(posixpath.dirname(n))
+            try:
+                rel_content = cleaned_slide_rels.get(n, src.read(n))
+                r_root = etree.fromstring(rel_content)
+                targets = []
+                for rel in r_root:
+                    if rel.get("TargetMode") == "External":
+                        continue
+                    t = rel.get("Target", "")
+                    norm = posixpath.normpath(posixpath.join(src_dir, t)).lstrip("/") if not t.startswith("/") else t.lstrip("/")
+                    targets.append(norm)
+                rels_map[n] = targets
+            except Exception:
+                pass
+
+    reachable = {"_rels/.rels", "[Content_Types].xml", "docProps/app.xml", "docProps/core.xml"}
+    queue = ["_rels/.rels"]
+    while queue:
+        cur_rel_file = queue.pop(0)
+        for tgt in rels_map.get(cur_rel_file, []):
+            if tgt not in reachable and tgt in deduped_names:
+                reachable.add(tgt)
+                tgt_rel_file = posixpath.join(posixpath.dirname(tgt), "_rels", posixpath.basename(tgt) + ".rels")
+                if tgt_rel_file in deduped_names:
+                    reachable.add(tgt_rel_file)
+                    queue.append(tgt_rel_file)
+
+    keep = [n for n in deduped_names if n not in drop and (n in reachable or not n.startswith("ppt/"))]
     keep_set = set(keep)
 
     notes_count = sum(1 for n in keep if n.startswith("ppt/notesSlides/notesSlide") and n.endswith(".xml"))
@@ -2356,23 +2784,34 @@ def sanitize_pptx_package(buf, slide_count):
             if n in written_entries:
                 continue
             written_entries.add(n)
-            data = src.read(n)
+
+            if n in cleaned_slide_rels:
+                data = cleaned_slide_rels[n]
+            else:
+                data = src.read(n)
+
             if n == "[Content_Types].xml":
-                xml = data.decode("utf-8")
-                seen_overrides = set()
+                try:
+                    ct_root = etree.fromstring(data)
+                    defaults = {ch.get("Extension", "").lower(): ch for ch in ct_root if ch.tag.split("}")[-1] == "Default"}
+                    if "svg" not in defaults:
+                        def_svg = etree.Element("Default", Extension="svg", ContentType="image/svg+xml")
+                        ct_root.insert(0, def_svg)
+                    if "bin" not in defaults:
+                        def_bin = etree.Element("Default", Extension="bin", ContentType="application/vnd.openxmlformats-officedocument.oleObject")
+                        ct_root.insert(0, def_bin)
 
-                def _ok(m):
-                    pname = m.group(1)
-                    if pname not in keep_set or pname in seen_overrides:
-                        return ""
-                    seen_overrides.add(pname)
-                    return m.group(0)
-
-                xml = re.sub(r'<Override PartName="/([^"]+)"[^>]*/>', _ok, xml)
-                data = xml.encode("utf-8")
+                    for ch in list(ct_root):
+                        if ch.tag.split("}")[-1] == "Override":
+                            pn = ch.get("PartName", "").lstrip("/")
+                            if pn not in keep_set or pn.endswith(".svg") or pn.endswith(".bin"):
+                                ct_root.remove(ch)
+                    data = etree.tostring(ct_root, xml_declaration=True, encoding="UTF-8", standalone=True)
+                except Exception:
+                    pass
             elif n == "docProps/app.xml":
                 data = app_xml.encode("utf-8")
-            elif n.endswith(".rels"):
+            elif n.endswith(".rels") and n not in cleaned_slide_rels:
                 xml = data.decode("utf-8")
                 base_dir = posixpath.dirname(posixpath.dirname(n))
 
@@ -2991,8 +3430,8 @@ def populate_vorlage_cover_slide(cover_slide, primary_lines, subtitle_lines):
                 apply_corporate_font_to_rpr(rpr)
 
     # Guarantee unique <p:cNvPr id="..."> across the entire cover slide XML (fixes native think-cell duplicate IDs)
-    for idx_id, cnv in enumerate(cover_slide._element.iter(qn_p("cNvPr")), start=1):
-        cnv.set("id", str(idx_id))
+    clean_slide_addin_and_ole_shapes(cover_slide._element)
+    assign_clean_slide_shape_ids(cover_slide._element)
 
 
 def is_closing_slide_candidate(slide):
@@ -3097,7 +3536,7 @@ def import_vorlage_kurzfassung_slide(
     if part_memo is None:
         part_memo = {}
 
-    shape_id_map = {}
+    elem_id_tracker = []
     for sh in src_slide.shapes:
         elem = deepcopy(sh._element)
         copy_and_restyle_shape(
@@ -3105,7 +3544,7 @@ def import_vorlage_kurzfassung_slide(
             theme_map={}, mapper=None,
             used_partnames=used_partnames,
             part_memo=part_memo,
-            shape_id_map=shape_id_map
+            elem_id_tracker=elem_id_tracker
         )
 
     # If title_text provided for Slide 2 (Kapitel mit großem Bild), update Textplatzhalter 1
@@ -3119,16 +3558,21 @@ def import_vorlage_kurzfassung_slide(
                     p.font.size = Pt(28)
                     p.font.color.rgb = RGBColor(255, 255, 255)
 
-    # Guarantee unique cNvPr IDs
-    for idx_id, cnv in enumerate(new_slide._element.iter(qn_p("cNvPr")), start=1):
-        cnv.set("id", str(idx_id))
+    # Clean add-in & OLE leftovers (e.g. native think-cell frame on Slide 12)
+    clean_slide_addin_and_ole_shapes(new_slide._element)
+    assign_clean_slide_shape_ids(new_slide._element)
+
+    final_shape_id_map = {}
+    for old_sid, cnv_el in elem_id_tracker:
+        if cnv_el.getparent() is not None:
+            final_shape_id_map[str(old_sid)] = cnv_el.get("id")
 
     # Copy speaker notes if provided
     if source_notes_slide is not None:
         copy_slide_notes(source_notes_slide, new_slide)
 
     # Copy transitions and animations if any
-    copy_slide_animations_and_timing(src_slide, new_slide, shape_id_map)
+    copy_slide_animations_and_timing(src_slide, new_slide, final_shape_id_map)
 
     return new_slide
 
@@ -3870,9 +4314,9 @@ def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide
         sn_hex = IFG_WHITE if snum_lum < 0.60 else IFG_NAVY
         append_front_slide_number(new_slide, (snx1, sny1, sncx, sncy), slide_num_int, sn_hex)
 
-    # Guarantee unique <p:cNvPr id="..."> across the entire slide XML
-    for idx_id, cnv in enumerate(new_slide._element.iter(qn_p("cNvPr")), start=1):
-        cnv.set("id", str(idx_id))
+    # Clean add-in & OLE leftovers and assign clean unique shape IDs
+    clean_slide_addin_and_ole_shapes(new_slide._element)
+    assign_clean_slide_shape_ids(new_slide._element)
 
 
 def build_arsipa_presentation(template_file, user_file):
@@ -3941,10 +4385,13 @@ def build_arsipa_presentation(template_file, user_file):
     used_partnames = {str(p.partname) for p in pkg_parts}
     part_memo = {}
     processed_slides = []
+    old_part_to_new_slide = {}
+    pending_slide_jumps = []
 
     for idx, old_slide in enumerate(user_slides):
         if idx == 0 and use_cover_for_slide_1:
             cover_slide = output_prs.slides[0] if keep_template_slide_1 else output_prs.slides.add_slide(cover_layout)
+            old_part_to_new_slide[str(old_slide.part.partname)] = cover_slide
             primary_lines, subtitle_lines = extract_cover_title_lines(old_slide)
             populate_vorlage_cover_slide(cover_slide, primary_lines, subtitle_lines)
             copy_slide_notes(old_slide, cover_slide)
@@ -3966,6 +4413,7 @@ def build_arsipa_presentation(template_file, user_file):
                 used_partnames=used_partnames,
                 part_memo=part_memo,
             )
+            old_part_to_new_slide[str(old_slide.part.partname)] = closing_slide
             processed_slides.append({
                 "index": idx,
                 "title": "Abschluss (Vielen Dank!)",
@@ -3975,7 +4423,8 @@ def build_arsipa_presentation(template_file, user_file):
             continue
 
         new_slide = output_prs.slides.add_slide(canvas_layout)
-        shape_id_map = {}
+        old_part_to_new_slide[str(old_slide.part.partname)] = new_slide
+        elem_id_tracker = []
 
         source_shapes = list(old_slide.shapes)
         hdr_info = extract_slide_header_components(old_slide, source_shapes, old_w, old_h, repeated_header_kickers)
@@ -4004,14 +4453,7 @@ def build_arsipa_presentation(template_file, user_file):
             except Exception:
                 pass
 
-        if use_vorlage_header and ph_titel_el is not None and hdr_info["top_title_sh"] is not None:
-            t_cnv = ph_titel_el.find(f".//{{{P_NS}}}cNvPr")
-            if t_cnv is not None and t_cnv.get("id"):
-                shape_id_map[str(hdr_info["top_title_sh"].shape_id)] = t_cnv.get("id")
-        if use_vorlage_header and ph_kapitel_el is not None and hdr_info["kapitel_sh"] is not None:
-            k_cnv = ph_kapitel_el.find(f".//{{{P_NS}}}cNvPr")
-            if k_cnv is not None and k_cnv.get("id"):
-                shape_id_map[str(hdr_info["kapitel_sh"].shape_id)] = k_cnv.get("id")
+
 
         is_centered_slide = is_centered_divider_slide(old_slide, old_w, old_h, use_vorlage_header=use_vorlage_header)
 
@@ -4065,7 +4507,8 @@ def build_arsipa_presentation(template_file, user_file):
                 mapper=mapper,
                 used_partnames=used_partnames,
                 part_memo=part_memo,
-                shape_id_map=shape_id_map
+                elem_id_tracker=elem_id_tracker,
+                pending_slide_jumps=pending_slide_jumps
             )
             copied_count += 1
 
@@ -4154,7 +4597,8 @@ def build_arsipa_presentation(template_file, user_file):
                 mapper=mapper,
                 used_partnames=used_partnames,
                 part_memo=part_memo,
-                shape_id_map=shape_id_map
+                elem_id_tracker=elem_id_tracker,
+                pending_slide_jumps=pending_slide_jumps
             )
             if sh is heading_sh:
                 heading_elem_on_new = elem
@@ -4185,11 +4629,30 @@ def build_arsipa_presentation(template_file, user_file):
             protected_elems=hdr_elems,
         )
 
+        clean_slide_addin_and_ole_shapes(new_slide._element)
+        assign_clean_slide_shape_ids(new_slide._element)
+
+        # Build final_shape_id_map now that all IDs are finalized!
+        final_shape_id_map = {}
+        for old_sid, cnv_el in elem_id_tracker:
+            if cnv_el.getparent() is not None:
+                final_shape_id_map[str(old_sid)] = cnv_el.get("id")
+
+        if use_vorlage_header:
+            if ph_titel_el is not None and hdr_info["top_title_sh"] is not None:
+                t_cnv = ph_titel_el.find(f".//{{{P_NS}}}cNvPr")
+                if t_cnv is not None and t_cnv.get("id"):
+                    final_shape_id_map[str(hdr_info["top_title_sh"].shape_id)] = t_cnv.get("id")
+            if ph_kapitel_el is not None and hdr_info["kapitel_sh"] is not None:
+                k_cnv = ph_kapitel_el.find(f".//{{{P_NS}}}cNvPr")
+                if k_cnv is not None and k_cnv.get("id"):
+                    final_shape_id_map[str(hdr_info["kapitel_sh"].shape_id)] = k_cnv.get("id")
+
         # Copy speaker notes (Notizen) from old_slide to new_slide
         copy_slide_notes(old_slide, new_slide)
 
         # Copy transitions and animations (<p:timing>) with remapped shape IDs
-        copy_slide_animations_and_timing(old_slide, new_slide, shape_id_map)
+        copy_slide_animations_and_timing(old_slide, new_slide, final_shape_id_map)
 
         processed_slides.append({
             "index": idx,
@@ -4212,6 +4675,23 @@ def build_arsipa_presentation(template_file, user_file):
             "layout_name": final_slide.slide_layout.name,
             "reason": "Offizielle IfG-Abschlussfolie (Vorlage Kurzfassung Folie 12 • Abschluss)"
         })
+
+    # Resolve any pending internal slide hyperlinks
+    for node, attr_k, sld_obj, target_old_pname in pending_slide_jumps:
+        if str(target_old_pname) in old_part_to_new_slide:
+            target_new_slide = old_part_to_new_slide[str(target_old_pname)]
+            try:
+                new_rid = sld_obj.part.relate_to(
+                    target_new_slide.part,
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
+                )
+                node.set(attr_k, new_rid)
+            except Exception:
+                if node.get("action", "").startswith("ppaction://hlinksldjump"):
+                    del node.attrib["action"]
+        else:
+            if node.get("action", "").startswith("ppaction://hlinksldjump"):
+                del node.attrib["action"]
 
     out_buf = io.BytesIO()
     output_prs.save(out_buf)

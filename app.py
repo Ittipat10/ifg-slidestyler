@@ -2204,7 +2204,9 @@ def copy_slide_notes(old_slide, new_slide):
 def copy_slide_animations_and_timing(old_slide, new_slide, shape_id_map):
     """
     Copies <p:timing> and <p:transition> from old_slide to new_slide,
-    remapping all shape IDs (spid) to the new IDs on new_slide.
+    remapping shape IDs (spid) and safely pruning orphaned animations
+    targeting shapes that do not exist on new_slide to prevent PowerPoint
+    repair warnings.
     """
     old_sld_el = getattr(old_slide, "_element", None)
     new_sld_el = getattr(new_slide, "_element", None)
@@ -2214,10 +2216,16 @@ def copy_slide_animations_and_timing(old_slide, new_slide, shape_id_map):
     # 1. Slide Transition (<p:transition>)
     old_trans = old_sld_el.find(qn_p("transition"))
     if old_trans is not None:
+        cloned_trans = deepcopy(old_trans)
+        # Strip any dangling sound effect references (sndAc with r:embed)
+        for snd in list(cloned_trans.iter(qn_p("sndAc"))):
+            p = snd.getparent()
+            if p is not None:
+                p.remove(snd)
         existing_trans = new_sld_el.find(qn_p("transition"))
         if existing_trans is not None:
             new_sld_el.remove(existing_trans)
-        cloned_trans = deepcopy(old_trans)
+        # Sequence: cSld -> clrMapOvr -> transition -> timing -> extLst
         insert_idx = len(new_sld_el)
         for i, ch in enumerate(new_sld_el):
             tag = ch.tag.split("}")[-1]
@@ -2231,14 +2239,62 @@ def copy_slide_animations_and_timing(old_slide, new_slide, shape_id_map):
     if old_timing is None:
         return
 
+    # Collect all valid shape IDs present on new_slide
+    valid_slide_spids = set()
+    for cnv in new_sld_el.iter(qn_p("cNvPr")):
+        sid = cnv.get("id")
+        if sid:
+            valid_slide_spids.add(str(sid))
+
     cloned_timing = deepcopy(old_timing)
 
-    # Remap shape references (spid) in the timing tree
+    # Strip any media/audio nodes referencing external or missing relationships
+    for el in list(cloned_timing.iter()):
+        for k, v in list(el.attrib.items()):
+            if k.endswith("}embed") or k.endswith("}link") or (isinstance(v, str) and re.match(r"^rId\d+$", v)):
+                if v not in new_slide.part.rels:
+                    p = el.getparent()
+                    if p is not None:
+                        p.remove(el)
+
+    # Remap shape references (spid) strictly (never remap TimeNode IDs!)
     if shape_id_map:
         for node in cloned_timing.iter():
             spid = node.get("spid")
             if spid is not None and str(spid) in shape_id_map:
                 node.set("spid", str(shape_id_map[str(spid)]))
+
+    # Prune orphaned paragraph build list items (<p:bldP>) targeting non-existent shapes
+    bld_lst = cloned_timing.find(qn_p("bldLst"))
+    if bld_lst is not None:
+        for child in list(bld_lst):
+            spid = child.get("spid")
+            if spid and spid not in valid_slide_spids:
+                bld_lst.remove(child)
+        if len(bld_lst) == 0:
+            cloned_timing.remove(bld_lst)
+
+    # Prune orphaned animation nodes targeting non-existent shapes (<p:spTgt>)
+    for sptgt in list(cloned_timing.iter(qn_p("spTgt"))):
+        spid = sptgt.get("spid")
+        if spid and spid not in valid_slide_spids:
+            cur = sptgt
+            to_remove = None
+            while cur is not None and cur != cloned_timing:
+                tag = cur.tag.split("}")[-1]
+                if tag in ("par", "seq", "cTn"):
+                    to_remove = cur
+                    parent = cur.getparent()
+                    if parent is not None and parent.tag.split("}")[-1] == "childTnLst":
+                        break
+                cur = cur.getparent()
+            if to_remove is not None and to_remove.getparent() is not None:
+                to_remove.getparent().remove(to_remove)
+
+    # If all animation targets were pruned or no valid animations remain, do not insert timing
+    remaining_targets = cloned_timing.findall(f".//{qn_p('spTgt')}")
+    if not remaining_targets:
+        return
 
     existing_timing = new_sld_el.find(qn_p("timing"))
     if existing_timing is not None:
@@ -3799,21 +3855,6 @@ def build_arsipa_presentation(template_file, user_file):
 
         if not use_vorlage_header:
             new_slide._element.set("showMasterSp", "0")
-            # Extra guarantee against orphaned left cyan bar (Rectangle 3) on non-header slides
-            try:
-                patch_bg_hex = IFG_WHITE
-                patch_sp = parse_xml(
-                    f'<p:sp xmlns:p="{P_NS}" xmlns:a="{A_NS}">'
-                    f'<p:nvSpPr><p:cNvPr id="99999" name="HeaderBarCover"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr/></p:nvSpPr>'
-                    f'<p:spPr><a:xfrm><a:off x="75000" y="520000"/><a:ext cx="140000" cy="320000"/></a:xfrm>'
-                    f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
-                    f'<a:solidFill><a:srgbClr val="{patch_bg_hex}"/></a:solidFill>'
-                    f'<a:ln><a:noFill/></a:ln></p:spPr>'
-                    f'</p:sp>'
-                )
-                new_slide.shapes._spTree.append(patch_sp)
-            except Exception:
-                pass
 
         theme_map = extract_slide_theme_map(old_slide)
         slide_bg_lum = 1.0

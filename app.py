@@ -2995,6 +2995,144 @@ def populate_vorlage_cover_slide(cover_slide, primary_lines, subtitle_lines):
         cnv.set("id", str(idx_id))
 
 
+def is_closing_slide_candidate(slide):
+    """
+    Detects whether a slide is an IfG closing / outro slide
+    (e.g., 'Vielen Dank', 'Institut für Gesundheit und Management',
+    'Mit Sicherheit. Mehr Gesundheit.', contact details, outro).
+    """
+    texts = []
+    for sh in slide.shapes:
+        if getattr(sh, "has_text_frame", False):
+            texts.append(" ".join(sh.text_frame.text.lower().split()))
+    full_text = " ".join(texts)
+
+    outro_patterns = [
+        "vielen dank",
+        "herzlichen dank",
+        "danke für ihre aufmerksamkeit",
+        "danke fuer ihre aufmerksamkeit",
+        "danke für die aufmerksamkeit",
+        "danke für ihre",
+        "danke schön",
+        "dankeschön",
+        "thank you",
+        "institut für gesundheit",
+        "institut fuer gesundheit",
+        "mit sicherheit. mehr gesundheit",
+        "mit sicherheit mehr gesundheit",
+        "leiter organisationsdiagnostik",
+        "sie haben noch fragen",
+        "fragen und anregungen",
+        "fragen & anregungen",
+        "wenden sie sich gerne an uns",
+        "gesundheitsmanagement.com",
+    ]
+    for pattern in outro_patterns:
+        if pattern in full_text:
+            return True
+
+    if "danke" in full_text and len(full_text) < 150:
+        return True
+
+    return False
+
+
+def get_vorlage_kurzfassung_path():
+    candidate_paths = [
+        "Arsipa Vorlage/ifg_PowerPoint_Vorlage_Kurzfassung.pptx",
+        os.path.join(os.path.dirname(__file__), "Arsipa Vorlage", "ifg_PowerPoint_Vorlage_Kurzfassung.pptx"),
+        os.path.join(os.getcwd(), "Arsipa Vorlage", "ifg_PowerPoint_Vorlage_Kurzfassung.pptx"),
+    ]
+    for p in candidate_paths:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def import_vorlage_kurzfassung_slide(
+    output_prs,
+    slide_index_0_based,
+    title_text=None,
+    source_notes_slide=None,
+    used_partnames=None,
+    part_memo=None
+):
+    """
+    Imports Slide 12 (Abschluss) or Slide 2 (Kapitel mit großem Bild) from
+    ifg_PowerPoint_Vorlage_Kurzfassung.pptx into output_prs.
+    """
+    kurz_path = get_vorlage_kurzfassung_path()
+    if not kurz_path:
+        raise FileNotFoundError("Vorlage Kurzfassung nicht gefunden unter Arsipa Vorlage/ifg_PowerPoint_Vorlage_Kurzfassung.pptx")
+
+    kurz_prs = Presentation(kurz_path)
+    if slide_index_0_based >= len(kurz_prs.slides):
+        slide_index_0_based = min(slide_index_0_based, len(kurz_prs.slides) - 1)
+    src_slide = kurz_prs.slides[slide_index_0_based]
+    src_layout_name = src_slide.slide_layout.name
+
+    # Find matching layout in output_prs
+    target_layout = None
+    for l in output_prs.slide_layouts:
+        if l.name.strip().lower() == src_layout_name.strip().lower():
+            target_layout = l
+            break
+    if target_layout is None:
+        target_layout = output_prs.slide_layouts[0]
+
+    new_slide = output_prs.slides.add_slide(target_layout)
+
+    # Clear empty default placeholder shapes created by add_slide
+    spTree = new_slide.shapes._spTree
+    for child in list(spTree):
+        if child.tag in (qn_p("nvGrpSpPr"), qn_p("grpSpPr")):
+            continue
+        spTree.remove(child)
+
+    if used_partnames is None:
+        pkg = output_prs.part.package
+        pkg_parts = list(pkg.iter_parts()) if hasattr(pkg, "iter_parts") else getattr(pkg, "parts", [])
+        used_partnames = {str(p.partname) for p in pkg_parts}
+    if part_memo is None:
+        part_memo = {}
+
+    shape_id_map = {}
+    for sh in src_slide.shapes:
+        elem = deepcopy(sh._element)
+        copy_and_restyle_shape(
+            sh, elem, src_slide, new_slide,
+            theme_map={}, mapper=None,
+            used_partnames=used_partnames,
+            part_memo=part_memo,
+            shape_id_map=shape_id_map
+        )
+
+    # If title_text provided for Slide 2 (Kapitel mit großem Bild), update Textplatzhalter 1
+    if title_text and slide_index_0_based == 1:
+        for sh in new_slide.shapes:
+            if getattr(sh, "has_text_frame", False) and "Titel der Präsentation" in sh.text_frame.text:
+                sh.text_frame.text = title_text
+                for p in sh.text_frame.paragraphs:
+                    p.font.name = CORPORATE_FONT
+                    p.font.bold = True
+                    p.font.size = Pt(28)
+                    p.font.color.rgb = RGBColor(255, 255, 255)
+
+    # Guarantee unique cNvPr IDs
+    for idx_id, cnv in enumerate(new_slide._element.iter(qn_p("cNvPr")), start=1):
+        cnv.set("id", str(idx_id))
+
+    # Copy speaker notes if provided
+    if source_notes_slide is not None:
+        copy_slide_notes(source_notes_slide, new_slide)
+
+    # Copy transitions and animations if any
+    copy_slide_animations_and_timing(src_slide, new_slide, shape_id_map)
+
+    return new_slide
+
+
 def create_white_logo_variant(png_blob):
     """Generates a white-on-transparent variant of the 'a.' corner logo while keeping the cyan bar intact."""
     try:
@@ -3758,7 +3896,15 @@ def build_arsipa_presentation(template_file, user_file):
     mapper = DeckColorMapper(user_prs)
 
     user_slides = list(user_prs.slides)
-    use_cover_for_slide_1 = len(user_slides) > 0 and is_cover_slide_candidate(user_slides[0])
+    num_user_slides = len(user_slides)
+    use_cover_for_slide_1 = num_user_slides > 0 and is_cover_slide_candidate(user_slides[0])
+    has_closing_slide = num_user_slides > 1 and is_closing_slide_candidate(user_slides[-1])
+
+    primary_lines, subtitle_lines = (
+        extract_cover_title_lines(user_slides[0])
+        if (use_cover_for_slide_1 and num_user_slides > 0)
+        else ([], [])
+    )
 
     # Clear template sample slides safely (preserving Vorlage Slide 1 when used as Cover Slide!)
     slide_ids = list(output_prs.slides._sldIdLst)
@@ -3809,6 +3955,22 @@ def build_arsipa_presentation(template_file, user_file):
                 "title": full_cover_title or "Titelfolie",
                 "layout_name": cover_slide.slide_layout.name,
                 "reason": "Offizielle IfG-Titelfolie (Kapitel mit großem Bild) • Titel in Weiß (#FFFFFF) & Abadi"
+            })
+            continue
+
+        if idx == num_user_slides - 1 and has_closing_slide:
+            closing_slide = import_vorlage_kurzfassung_slide(
+                output_prs,
+                slide_index_0_based=11,  # Slide 12: Abschluss
+                source_notes_slide=old_slide,
+                used_partnames=used_partnames,
+                part_memo=part_memo,
+            )
+            processed_slides.append({
+                "index": idx,
+                "title": "Abschluss (Vielen Dank!)",
+                "layout_name": closing_slide.slide_layout.name,
+                "reason": "Offizielle IfG-Abschlussfolie (Vorlage Kurzfassung Folie 12 • Abschluss)"
             })
             continue
 
@@ -4034,6 +4196,23 @@ def build_arsipa_presentation(template_file, user_file):
             "title": slide_title_label or f"Folie {idx + 1}",
             "layout_name": canvas_layout.name,
             "reason": f"1:1 Original-Aufbau erhalten ({copied_count} Elemente) • Schriftart Abadi & IfG-Farben angewendet"
+        })
+
+    # If the presentation did NOT end with a closing slide, always append Slide 2 of Vorlage Kurzfassung
+    if not has_closing_slide and num_user_slides > 0:
+        deck_title = " — ".join(primary_lines) if primary_lines else None
+        final_slide = import_vorlage_kurzfassung_slide(
+            output_prs,
+            slide_index_0_based=1,  # Slide 2: Kapitel mit großem Bild
+            title_text=deck_title,
+            used_partnames=used_partnames,
+            part_memo=part_memo,
+        )
+        processed_slides.append({
+            "index": len(processed_slides),
+            "title": deck_title or "Kapitel mit großem Bild",
+            "layout_name": final_slide.slide_layout.name,
+            "reason": "Offizielle IfG-Schlussfolie (Vorlage Kurzfassung Folie 2 • Kapitel mit großem Bild)"
         })
 
     out_buf = io.BytesIO()

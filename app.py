@@ -323,14 +323,15 @@ KAPITEL_FONT_SZ = "1200"       # Official Vorlage 'Kapitel' size: 12 pt
 VORLAGE_KAPITEL_GRAY = "808080"  # Matches Vorlage slideLayout1 bg1 lumMod=50000
 
 # Official IfG / Arsipa Corporate Color Palette (from Vorlage theme1.xml)
-IFG_NAVY = "012641"       # Primary Brand Dark Navy (Headings, Primary Boxes, Headers)
+IFG_NAVY = "012641"       # Primary Brand Dark Navy ("สีน้ำเงินเข้ม", Headings, Primary Boxes, Headers)
+IFG_LIGHT_BLUE = "3EB9C0" # Primary Brand Light Blue / Cyan ("ฟ้าอ่อน", Accent 2, Highlights, Bubbles)
 IFG_CHARCOAL = "3A4A63"   # Body Text & Neutral Lines
 IFG_MUTED = "8C96A5"      # Kickers, Subtitles, Muted Captions
 IFG_WHITE = "FFFFFF"
 
-DARK_BRAND_SWATCHES = ["012641", "006174", "3E3D5E", "007A8C"]
-MID_BRAND_SWATCHES = ["00A8B7", "3EB9C0", "57577C", "2B7A9B"]
-LIGHT_BRAND_SWATCHES = ["D9F0F2", "C5E4EE", "DCE3F0", "E8F5F6"]
+DARK_BRAND_SWATCHES = ["012641", "04305C", "006174", "007A8C"]
+MID_BRAND_SWATCHES = ["3EB9C0", "00A8B7", "2B7A9B", "00B7E0"]
+LIGHT_BRAND_SWATCHES = ["D9F0F2", "E8F5F6", "C5E4EE", "F1F5F9"]
 
 SYMBOL_FONTS = {
     "wingdings", "wingdings 2", "wingdings 3", "webdings", "symbol",
@@ -692,6 +693,21 @@ class DeckColorMapper:
             else:
                 return IFG_NAVY if role == "fill" else IFG_CHARCOAL
 
+        # Dedicated Blue / Cyan / Navy Brand Handling (165° <= hue <= 265°)
+        # When user slides contain blues/cyans (standard corporate/deck colors):
+        # - Dark blues (lum < 0.38) -> Official IfG Navy #012641 ("สีน้ำเงินเข้ม")
+        # - Mid / Light blues (0.38 <= lum < 0.78) -> Official IfG Light Blue / Cyan #3EB9C0 ("ฟ้าอ่อน")
+        # - Pale / Tint blues (lum >= 0.78) -> Soft Corporate Cyan Tint #D9F0F2
+        h, _, _ = colorsys.rgb_to_hls(rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
+        hue_deg = h * 360.0
+        if 165.0 <= hue_deg <= 265.0:
+            if lum < 0.38:
+                return IFG_NAVY
+            elif lum < 0.78:
+                return IFG_LIGHT_BLUE
+            else:
+                return "D9F0F2"
+
         # Chromatic colors mapped by luminance tier so contrast never inverts
         if lum < 0.38:
             return self._match_cluster(rgb, self.dark_clusters, DARK_BRAND_SWATCHES)
@@ -826,13 +842,13 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                     def_rpr.set("sz", TITLE_FONT_SZ if header_size_mode == "title" else KAPITEL_FONT_SZ)
                 def_sf = def_rpr.find(qn_a("solidFill"))
                 if def_sf is not None:
-                    write_srgb_into_parent(def_sf, IFG_WHITE if bg_lum < 0.48 else (IFG_NAVY if is_heading_shape else IFG_CHARCOAL))
+                    write_srgb_into_parent(def_sf, IFG_WHITE if bg_lum < 0.60 else (IFG_NAVY if is_heading_shape else IFG_CHARCOAL))
                 apply_corporate_font_to_rpr(def_rpr)
 
             # Restyle explicit bullet color (<a:buClr>) if present; never touch <a:buFont>!
             bu_clr = ppr.find(qn_a("buClr"))
             if bu_clr is not None:
-                new_bu_hex = IFG_WHITE if bg_lum < 0.48 else IFG_NAVY
+                new_bu_hex = IFG_WHITE if bg_lum < 0.60 else IFG_NAVY
                 write_srgb_into_parent(bu_clr, new_bu_hex)
 
         for child in p:
@@ -882,7 +898,7 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                         orig_rgb = res[0]
 
                 # Choose corporate text color with strict contrast guarantee
-                if bg_lum < 0.48:
+                if bg_lum < 0.60:
                     new_txt_hex = IFG_WHITE
                 elif header_size_mode == "kapitel" or is_kicker_run_in_title:
                     new_txt_hex = VORLAGE_KAPITEL_GRAY
@@ -895,7 +911,7 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                         # Highlighted / colored text run -> map to dark/readable corporate brand color
                         mapped = mapper.map_fill_or_line(orig_rgb, role="fill")
                         if perceived_brightness(hex_to_rgb(mapped)) > 0.55:
-                            mapped = "006174"
+                            mapped = IFG_NAVY
                         new_txt_hex = mapped
                     elif is_heading_shape:
                         if max_sz > 0 and run_sz > 0 and run_sz < max_sz - 300 and run_sz < 1800:
@@ -1587,7 +1603,7 @@ def restyle_sp_or_cxn(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, is_
             res = resolve_color_from_parent(font_ref, theme_map)
             if res is not None:
                 style_font_rgb = res[0]
-            write_srgb_into_parent(font_ref, IFG_WHITE if effective_bg_lum < 0.48 else IFG_CHARCOAL)
+            write_srgb_into_parent(font_ref, IFG_WHITE if effective_bg_lum < 0.60 else IFG_CHARCOAL)
 
     if tag == "sp":
         txbody = el.find(qn_p("txBody"))
@@ -1646,7 +1662,7 @@ def restyle_table_element(tbl_el, theme_map, mapper, font_scale=1.0):
                 mapper=mapper,
                 bg_lum=cell_bg_lum,
                 is_heading_shape=(r_idx == 0),
-                style_font_rgb=(255, 255, 255) if cell_bg_lum < 0.48 else (0, 0, 0),
+                style_font_rgb=(255, 255, 255) if cell_bg_lum < 0.60 else (0, 0, 0),
                 font_scale=font_scale
             )
 
@@ -3319,7 +3335,7 @@ def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide
 
     snum_covered, snum_lum, _ = _effective_color_at_box((snx1, sny1, snx2, sny2))
     if snum_covered:
-        sn_hex = IFG_WHITE if snum_lum < 0.48 else IFG_NAVY
+        sn_hex = IFG_WHITE if snum_lum < 0.60 else IFG_NAVY
         append_front_slide_number(new_slide, (snx1, sny1, sncx, sncy), slide_num_int, sn_hex)
 
     # Guarantee unique <p:cNvPr id="..."> across the entire slide XML
@@ -3648,7 +3664,7 @@ st.markdown("""
         </li>
         <li class="ifg-feature-item">
             <div class="ifg-bullet-dot"></div>
-            <div><strong>Intelligente IfG / Arsipa Farbpalette</strong>: Alte Farben werden kontrastgetreu in Deep Navy (<code>#012641</code>), Corporate Teal (<code>#00A8B7</code> / <code>#3EB9C0</code>) und Slate Charcoal (<code>#3A4A63</code>) überführt.</div>
+            <div><strong>Offizielle IfG / Arsipa Farbpalette</strong>: Primärfarben werden präzise in Deep Navy (<code>#012641</code>), Helles Cyan/Blau (<code>#3EB9C0</code>) und Slate Charcoal (<code>#3A4A63</code>) überführt.</div>
         </li>
         <li class="ifg-feature-item">
             <div class="ifg-bullet-dot"></div>

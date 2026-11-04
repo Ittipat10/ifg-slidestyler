@@ -209,72 +209,157 @@ st.markdown("""
         flex-shrink: 0;
     }
 
-    /* Streamlit Form Components */
-    [data-testid="stSelectbox"] > div > div {
-        background-color: #ffffff !important;
-        border: 1px solid #cbd5e1 !important;
-        border-radius: 10px !important;
-        color: #0f172a !important;
-        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.04) !important;
-        font-size: 0.92rem !important;
+    /* Streamlit Form Components - Branded Deep Navy #012641 with crisp White text */
+    [data-testid="stSelectbox"] > div > div,
+    [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+        background-color: #012641 !important;
+        border: 1.5px solid #012641 !important;
+        border-radius: 12px !important;
+        color: #ffffff !important;
+        box-shadow: 0 2px 4px 0 rgba(1, 38, 65, 0.2) !important;
+        font-size: 0.95rem !important;
+        transition: all 0.2s ease !important;
     }
-    [data-testid="stSelectbox"] > div > div:hover {
-        border-color: #012641 !important;
+    [data-testid="stSelectbox"] > div > div:hover,
+    [data-testid="stSelectbox"] div[data-baseweb="select"] > div:hover {
+        border-color: #3EB9C0 !important;
+        box-shadow: 0 0 0 1px #3EB9C0 !important;
+    }
+    [data-testid="stSelectbox"] div[data-baseweb="select"] * {
+        color: #ffffff !important;
+        fill: #ffffff !important;
+    }
+    [data-testid="stSelectbox"] svg {
+        color: #ffffff !important;
+        fill: #ffffff !important;
     }
 
+    /* Selectbox Virtual Dropdown Options Popup */
+    div[data-baseweb="popover"],
+    div[data-baseweb="popover"] > div,
+    ul[data-testid="stSelectboxVirtualDropdown"],
+    div[data-baseweb="menu"] {
+        background-color: #012641 !important;
+        border: 1px solid #083254 !important;
+        border-radius: 12px !important;
+        box-shadow: 0 6px 18px rgba(1, 38, 65, 0.35) !important;
+    }
+    li[role="option"],
+    div[data-baseweb="menu"] li,
+    div[data-baseweb="menu"] [role="option"] {
+        background-color: #012641 !important;
+        color: #ffffff !important;
+        font-size: 0.92rem !important;
+        border-radius: 8px !important;
+        margin: 2px 4px !important;
+        transition: all 0.15s ease !important;
+    }
+    li[role="option"]:hover,
+    li[role="option"][aria-selected="true"],
+    div[data-baseweb="menu"] li:hover {
+        background-color: #083254 !important;
+        color: #3EB9C0 !important;
+    }
+
+    /* File Uploader */
     [data-testid="stFileUploader"] section {
         background-color: #ffffff !important;
-        border: 2px dashed #cbd5e1 !important;
+        border: 2px dashed #012641 !important;
         border-radius: 14px !important;
-        padding: 20px !important;
+        padding: 22px !important;
         transition: all 0.2s ease !important;
     }
     [data-testid="stFileUploader"] section:hover {
-        border-color: #012641 !important;
+        border-color: #3EB9C0 !important;
         background-color: #f8fafc !important;
     }
 
-    label, [data-testid="stWidgetLabel"] p {
-        color: #0f172a !important;
+    /* Branded Upload Button inside stFileUploader */
+    [data-testid="stFileUploader"] section button,
+    [data-testid="stFileUploader"] button {
+        background-color: #012641 !important;
+        color: #ffffff !important;
+        border: 1.5px solid #3EB9C0 !important;
+        border-radius: 10px !important;
+        padding: 0.55rem 1.4rem !important;
         font-weight: 600 !important;
-        font-size: 0.92rem !important;
+        font-size: 0.95rem !important;
+        box-shadow: 0 2px 5px rgba(1, 38, 65, 0.2) !important;
+        transition: all 0.2s ease !important;
+    }
+    [data-testid="stFileUploader"] section button:hover,
+    [data-testid="stFileUploader"] button:hover {
+        background-color: #083254 !important;
+        border-color: #3EB9C0 !important;
+        color: #ffffff !important;
+        transform: translateY(-1px) !important;
+        box-shadow: 0 4px 10px rgba(1, 38, 65, 0.3) !important;
+    }
+    [data-testid="stFileUploader"] section button *,
+    [data-testid="stFileUploader"] button * {
+        color: #ffffff !important;
+        fill: #ffffff !important;
+        stroke: #ffffff !important;
+    }
+    [data-testid="stFileUploader"] section button svg,
+    [data-testid="stFileUploader"] button svg {
+        fill: #ffffff !important;
+        stroke: #ffffff !important;
+        color: #ffffff !important;
     }
 
-    /* Buttons */
+    label, [data-testid="stWidgetLabel"] p {
+        color: #012641 !important;
+        font-weight: 700 !important;
+        font-size: 0.95rem !important;
+    }
+
+    /* Convert Button (1-Click Transform) */
     .stButton > button {
         background: #012641 !important;
         color: #ffffff !important;
-        border: none !important;
+        border: 1.5px solid #012641 !important;
         border-radius: 12px !important;
         padding: 0.85rem 2rem !important;
         font-size: 1.05rem !important;
         font-weight: 600 !important;
         width: 100% !important;
-        box-shadow: 0 2px 4px 0 rgba(1, 38, 65, 0.18) !important;
+        box-shadow: 0 2px 6px 0 rgba(1, 38, 65, 0.25) !important;
         transition: all 0.2s ease !important;
     }
     .stButton > button:hover {
         background: #083254 !important;
+        border-color: #3EB9C0 !important;
+        color: #ffffff !important;
         transform: translateY(-1px);
-        box-shadow: 0 4px 10px 0 rgba(1, 38, 65, 0.25) !important;
+        box-shadow: 0 4px 12px 0 rgba(1, 38, 65, 0.35) !important;
+    }
+    .stButton > button * {
+        color: #ffffff !important;
     }
 
+    /* Download Button (Branded #012641 with #3EB9C0 border & White text) */
     .stDownloadButton > button {
-        background: #059669 !important;
+        background: #012641 !important;
         color: #ffffff !important;
-        border: none !important;
+        border: 1.5px solid #3EB9C0 !important;
         border-radius: 12px !important;
         padding: 0.85rem 2rem !important;
         font-size: 1.05rem !important;
         font-weight: 600 !important;
         width: 100% !important;
-        box-shadow: 0 2px 4px 0 rgba(5, 150, 105, 0.2) !important;
+        box-shadow: 0 2px 6px 0 rgba(1, 38, 65, 0.25) !important;
         transition: all 0.2s ease !important;
     }
     .stDownloadButton > button:hover {
-        background: #047857 !important;
+        background: #083254 !important;
+        border-color: #3EB9C0 !important;
+        color: #ffffff !important;
         transform: translateY(-1px);
-        box-shadow: 0 4px 10px 0 rgba(5, 150, 105, 0.28) !important;
+        box-shadow: 0 4px 12px 0 rgba(1, 38, 65, 0.35) !important;
+    }
+    .stDownloadButton > button * {
+        color: #ffffff !important;
     }
 
     /* Success Card */

@@ -623,6 +623,16 @@ class DeckColorMapper:
     IfG / Arsipa Corporate Design palette while strictly preserving luminance
     tiers (dark / medium / light) and distinguishing multiple accent colors.
     """
+    brand_navy = IFG_NAVY
+    brand_light_blue = IFG_LIGHT_BLUE
+    brand_charcoal = IFG_CHARCOAL
+    brand_muted = IFG_MUTED
+    brand_white = IFG_WHITE
+    chart_palette = CHART_DIAGRAM_PALETTE
+    dark_swatches = DARK_BRAND_SWATCHES
+    mid_swatches = MID_BRAND_SWATCHES
+    light_swatches = LIGHT_BRAND_SWATCHES
+
     def __init__(self, user_prs):
         self.dark_clusters = []   # [(center_rgb, mapped_hex)]
         self.mid_clusters = []
@@ -798,6 +808,10 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
     if txbody is None:
         return
 
+    primary_dark = getattr(mapper, "brand_navy", IFG_NAVY) if mapper else IFG_NAVY
+    primary_charcoal = getattr(mapper, "brand_charcoal", IFG_CHARCOAL) if mapper else IFG_CHARCOAL
+    primary_muted = getattr(mapper, "brand_muted", IFG_MUTED) if mapper else IFG_MUTED
+
     # Restyle lstStyle defRPr fonts if present
     lst_style = txbody.find(qn_a("lstStyle"))
     lst_lvl_colors = {}
@@ -827,7 +841,7 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                         def_rpr.set("sz", TITLE_FONT_SZ if header_size_mode == "title" else KAPITEL_FONT_SZ)
                     def_sf = def_rpr.find(qn_a("solidFill"))
                     if def_sf is not None:
-                        write_srgb_into_parent(def_sf, IFG_WHITE if bg_lum < 0.48 else (IFG_NAVY if is_heading_shape else IFG_CHARCOAL))
+                        write_srgb_into_parent(def_sf, IFG_WHITE if bg_lum < 0.48 else (primary_dark if is_heading_shape else primary_charcoal))
                     apply_corporate_font_to_rpr(def_rpr)
 
     # Determine largest font size in this text body to distinguish main title vs kicker line
@@ -863,13 +877,13 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                     def_rpr.set("sz", TITLE_FONT_SZ if header_size_mode == "title" else KAPITEL_FONT_SZ)
                 def_sf = def_rpr.find(qn_a("solidFill"))
                 if def_sf is not None:
-                    write_srgb_into_parent(def_sf, IFG_WHITE if bg_lum < 0.60 else (IFG_NAVY if is_heading_shape else IFG_CHARCOAL))
+                    write_srgb_into_parent(def_sf, IFG_WHITE if bg_lum < 0.60 else (primary_dark if is_heading_shape else primary_charcoal))
                 apply_corporate_font_to_rpr(def_rpr)
 
             # Restyle explicit bullet color (<a:buClr>) if present; never touch <a:buFont>!
             bu_clr = ppr.find(qn_a("buClr"))
             if bu_clr is not None:
-                new_bu_hex = IFG_WHITE if bg_lum < 0.60 else IFG_NAVY
+                new_bu_hex = IFG_WHITE if bg_lum < 0.60 else primary_dark
                 write_srgb_into_parent(bu_clr, new_bu_hex)
 
         for child in p:
@@ -920,12 +934,16 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                         orig_rgb = res[0]
 
                 # Choose corporate text color with strict contrast guarantee
-                if bg_lum < 0.60:
+                is_orig_white = (rgb_saturation(orig_rgb) < 0.12 and perceived_brightness(orig_rgb) >= 0.90)
+                if bg_lum < 0.60 or (is_orig_white and bg_lum < 0.80):
                     new_txt_hex = IFG_WHITE
                 elif header_size_mode == "kapitel" or is_kicker_run_in_title:
                     new_txt_hex = VORLAGE_KAPITEL_GRAY
                 elif header_size_mode == "title":
-                    new_txt_hex = IFG_NAVY
+                    new_txt_hex = primary_dark
+                elif getattr(mapper, "is_azubifit", False):
+                    # Azubifit rule: ALL slide text is Deep Navy #012641 on light bg, White #FFFFFF on dark bg/images
+                    new_txt_hex = primary_dark
                 else:
                     orig_sat = rgb_saturation(orig_rgb)
                     orig_lum = perceived_brightness(orig_rgb)
@@ -933,20 +951,20 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                         # Highlighted / colored text run -> map to dark/readable corporate brand color
                         mapped = mapper.map_fill_or_line(orig_rgb, role="fill")
                         if perceived_brightness(hex_to_rgb(mapped)) > 0.55:
-                            mapped = IFG_NAVY
+                            mapped = primary_dark
                         new_txt_hex = mapped
                     elif is_heading_shape:
                         if max_sz > 0 and run_sz > 0 and run_sz < max_sz - 300 and run_sz < 1800:
-                            new_txt_hex = IFG_MUTED
+                            new_txt_hex = primary_muted
                         else:
-                            new_txt_hex = IFG_NAVY
+                            new_txt_hex = primary_dark
                     elif run_sz >= 2000:
-                        new_txt_hex = IFG_NAVY
+                        new_txt_hex = primary_dark
                     elif 0.40 <= orig_lum <= 0.78 and orig_sat < 0.20 and (run_sz == 0 or run_sz < 1800):
                         # Small muted gray kicker / caption
-                        new_txt_hex = IFG_MUTED
+                        new_txt_hex = primary_muted
                     else:
-                        new_txt_hex = IFG_CHARCOAL
+                        new_txt_hex = primary_charcoal
 
                 # Ensure <a:solidFill> exists in proper DrawingML schema position inside <a:rPr>
                 for ftag in ("noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill"):
@@ -966,7 +984,7 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                 if rpr is not None:
                     fld_sf = rpr.find(qn_a("solidFill"))
                     if fld_sf is not None:
-                        write_srgb_into_parent(fld_sf, IFG_WHITE if bg_lum < 0.48 else IFG_CHARCOAL)
+                        write_srgb_into_parent(fld_sf, IFG_WHITE if bg_lum < 0.48 else primary_charcoal)
                     apply_corporate_font_to_rpr(rpr)
             elif ctag == "endParaRPr":
                 if header_size_mode == "kapitel":
@@ -977,7 +995,7 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                     child.set("sz", str(int(round(p_def_sz * font_scale)) if abs(font_scale - 1.0) > 0.02 else p_def_sz))
                 end_sf = child.find(qn_a("solidFill"))
                 if end_sf is not None:
-                    write_srgb_into_parent(end_sf, IFG_WHITE if bg_lum < 0.48 else (IFG_NAVY if is_heading_shape else IFG_CHARCOAL))
+                    write_srgb_into_parent(end_sf, IFG_WHITE if bg_lum < 0.48 else (primary_dark if is_heading_shape else primary_charcoal))
                 apply_corporate_font_to_rpr(child)
 
 
@@ -1832,6 +1850,10 @@ def restyle_any_element(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, i
                 res = resolve_color_from_parent(ln_sf, theme_map)
                 if res is not None:
                     write_srgb_into_parent(ln_sf, mapper.map_fill_or_line(res[0], role="line"), res[1])
+        pic_bbox = get_local_bbox(el)
+        if pic_bbox is not None and z_bg_stack is not None:
+            # Pictures/images act as visual backdrops so text placed over them renders in clean White #FFFFFF
+            z_bg_stack.append((pic_bbox[0], pic_bbox[1], pic_bbox[2], pic_bbox[3], 0.35))
     elif tag == "grpSp":
         grp_stack = []
         for child in el:
@@ -1933,7 +1955,7 @@ def _insert_pie_dpt(ser, dpt):
 
 
 def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
-    """Updates fonts to Abadi and harmonizes colors inside cloned SmartArt / Chart XML parts according to CHART_DIAGRAM_PALETTE."""
+    """Updates fonts to Abadi and harmonizes colors inside cloned SmartArt / Chart XML parts according to CHART_DIAGRAM_PALETTE / Azubifit palette."""
     try:
         root = etree.fromstring(xml_bytes)
     except Exception:
@@ -1941,6 +1963,8 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
 
     pname = partname_str.lower()
     old_acc1_lum = perceived_brightness(theme_map.get("accent1", (68, 114, 196)))
+    chart_palette = getattr(mapper, "chart_palette", CHART_DIAGRAM_PALETTE) if mapper else CHART_DIAGRAM_PALETTE
+    primary_dark = getattr(mapper, "brand_navy", IFG_NAVY) if mapper else IFG_NAVY
 
     # 1. Update all text fonts to Abadi (skipping symbol fonts)
     for rpr in root.findall(f".//{{{A_NS}}}rPr") + root.findall(f".//{{{A_NS}}}defRPr") + root.findall(f".//{{{A_NS}}}endParaRPr"):
@@ -1968,7 +1992,7 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
                 dpts = ser.findall(f"{{{C_NS}}}dPt")
                 if dpts:
                     for i, dpt in enumerate(dpts):
-                        c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
+                        c_hex = chart_palette[i % len(chart_palette)]
                         sp_pr = _get_or_insert_dpt_sppr(dpt)
                         _set_chart_solid_fill(sp_pr, c_hex)
                         _set_chart_line_fill(sp_pr, "FFFFFF", width=19050)
@@ -1977,7 +2001,7 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
                     num_pts = int(pt_count_el.get("val", "0")) if pt_count_el is not None else 0
                     if num_pts > 0:
                         for i in range(num_pts):
-                            c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
+                            c_hex = chart_palette[i % len(chart_palette)]
                             dpt = etree.Element(f"{{{C_NS}}}dPt")
                             idx_el = etree.SubElement(dpt, f"{{{C_NS}}}idx")
                             idx_el.set("val", str(i))
@@ -1990,7 +2014,7 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
         for bar in root.findall(f".//{{{C_NS}}}barChart") + root.findall(f".//{{{C_NS}}}bar3DChart"):
             sers = bar.findall(f"{{{C_NS}}}ser")
             for i, ser in enumerate(sers):
-                c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
+                c_hex = chart_palette[i % len(chart_palette)]
                 sp_pr = _get_or_insert_ser_sppr(ser)
                 _set_chart_solid_fill(sp_pr, c_hex)
 
@@ -1998,7 +2022,7 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
         for line in root.findall(f".//{{{C_NS}}}lineChart") + root.findall(f".//{{{C_NS}}}scatterChart") + root.findall(f".//{{{C_NS}}}line3DChart"):
             sers = line.findall(f"{{{C_NS}}}ser")
             for i, ser in enumerate(sers):
-                c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
+                c_hex = chart_palette[i % len(chart_palette)]
                 sp_pr = _get_or_insert_ser_sppr(ser)
                 _set_chart_line_fill(sp_pr, c_hex, width=28575)
                 marker = ser.find(f"{{{C_NS}}}marker")
@@ -2010,14 +2034,14 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
         for area in root.findall(f".//{{{C_NS}}}areaChart") + root.findall(f".//{{{C_NS}}}area3DChart"):
             sers = area.findall(f"{{{C_NS}}}ser")
             for i, ser in enumerate(sers):
-                c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
+                c_hex = chart_palette[i % len(chart_palette)]
                 sp_pr = _get_or_insert_ser_sppr(ser)
                 _set_chart_solid_fill(sp_pr, c_hex)
 
         for radar in root.findall(f".//{{{C_NS}}}radarChart"):
             sers = radar.findall(f"{{{C_NS}}}ser")
             for i, ser in enumerate(sers):
-                c_hex = CHART_DIAGRAM_PALETTE[i % len(CHART_DIAGRAM_PALETTE)]
+                c_hex = chart_palette[i % len(chart_palette)]
                 sp_pr = _get_or_insert_ser_sppr(ser)
                 _set_chart_line_fill(sp_pr, c_hex, width=25400)
 
@@ -2043,7 +2067,7 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
                     # In rPr (text run), keep dark/white readability
                     if "rPr" in anc_tags or "defRPr" in anc_tags:
                         lum = perceived_brightness(rgb)
-                        new_hex = IFG_WHITE if lum > 0.85 else IFG_NAVY
+                        new_hex = IFG_WHITE if lum > 0.85 else primary_dark
                     else:
                         new_hex = mapper.map_fill_or_line(rgb, role="fill")
                     write_srgb_into_parent(parent, new_hex, alpha_val)
@@ -3744,7 +3768,8 @@ def populate_vorlage_content_header(
     header_cx = max(int(3.2 * 914400), max_x2 - hdr_x)
     header_bg_lum = get_bg_lum_under_box((hdr_x, tit_y, hdr_x + min(header_cx, int(3.5 * 914400)), tit_y + 523220), z_bg_stack, slide_bg_lum)
 
-    titel_hex = IFG_WHITE if header_bg_lum < 0.48 else IFG_NAVY
+    primary_dark = brand_assets.get("primary_dark_hex", IFG_NAVY)
+    titel_hex = IFG_WHITE if header_bg_lum < 0.48 else primary_dark
     kapitel_hex = IFG_WHITE if header_bg_lum < 0.48 else VORLAGE_KAPITEL_GRAY
     heading_tf = brand_assets.get("heading_typeface", CORPORATE_FONT)
     body_tf = brand_assets.get("body_typeface", CORPORATE_FONT)
@@ -4311,7 +4336,8 @@ def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide
 
     snum_covered, snum_lum, _ = _effective_color_at_box((snx1, sny1, snx2, sny2))
     if snum_covered:
-        sn_hex = IFG_WHITE if snum_lum < 0.60 else IFG_NAVY
+        primary_dark = brand_assets.get("primary_dark_hex", IFG_NAVY)
+        sn_hex = IFG_WHITE if snum_lum < 0.60 else primary_dark
         append_front_slide_number(new_slide, (snx1, sny1, sncx, sncy), slide_num_int, sn_hex)
 
     # Clean add-in & OLE leftovers and assign clean unique shape IDs
@@ -4319,14 +4345,14 @@ def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide
     assign_clean_slide_shape_ids(new_slide._element)
 
 
-def build_arsipa_presentation(template_file, user_file):
+def build_arsipa_presentation(template_file, user_file, theme_mode="ifg"):
     """
     Converts every slide (N -> N) from user_file into template_file (Vorlage):
     - Slide 1 (Cover): Places the presentation title onto the official Vorlage Cover Slide
       ('Kapitel mit großem Bild') in crisp White (#FFFFFF) Abadi text.
     - Slides 2..N: Preserves 100% of the exact original layout, shapes, groups, tables,
       images, SmartArt diagrams, and charts while restyling ONLY fonts (Abadi) and colors
-      (IfG / Arsipa Corporate Design).
+      (IfG / Arsipa Corporate Design or Azubifit Designfarben depending on theme_mode).
     """
     output_prs = Presentation(template_file)
     user_prs = Presentation(user_file)
@@ -4337,7 +4363,15 @@ def build_arsipa_presentation(template_file, user_file):
     brand_assets = extract_vorlage_brand_assets(output_prs)
 
     # Pre-scan deck colors for consistent 1:1 corporate color mapping
-    mapper = DeckColorMapper(user_prs)
+    if theme_mode == "azubifit":
+        from azubifit_theme import AzubifitColorMapper, AZUBI_TEXT_NAVY, AZUBI_GREEN
+        mapper = AzubifitColorMapper(user_prs)
+        brand_assets["primary_dark_hex"] = AZUBI_TEXT_NAVY
+        brand_assets["primary_accent_hex"] = AZUBI_GREEN
+    else:
+        mapper = DeckColorMapper(user_prs)
+        brand_assets["primary_dark_hex"] = IFG_NAVY
+        brand_assets["primary_accent_hex"] = IFG_LIGHT_BLUE
 
     user_slides = list(user_prs.slides)
     num_user_slides = len(user_slides)
@@ -4759,6 +4793,7 @@ st.markdown("""
 DEFAULT_TEMPLATES = {
     "⭐ IfG Vorlage Kurzfassung (Empfohlen – 6,7 MB, schnelle Ladezeit)": "Arsipa Vorlage/ifg_PowerPoint_Vorlage_Kurzfassung.pptx",
     "🏢 IfG Vorlage Vollversion (47 Layouts – 37 MB)": "Arsipa Vorlage/Vorlage_Power_Point_Arsipa.pptx",
+    "🌱 Azubifit Vorlage (Empfohlen – Azubifit Designfarben Grün/Multi-Akzent)": "Arsipa Vorlage/ifg_PowerPoint_Vorlage_Kurzfassung.pptx",
     "📁 Eigene Vorlagendatei (.pptx) hochladen": None
 }
 
@@ -4787,6 +4822,9 @@ user_file = st.file_uploader("2. Ausgangspräsentation hochladen, die konvertier
 if template_file_to_use and user_file:
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
+    is_azubifit = "Azubifit" in template_choice
+    theme_mode = "azubifit" if is_azubifit else "ifg"
+
     current_key = f"{getattr(user_file, 'name', '')}_{getattr(user_file, 'size', 0)}_{template_choice}"
     if st.session_state.get('last_processed_file') != current_key:
         st.session_state.pop('transformed_bytes', None)
@@ -4796,28 +4834,37 @@ if template_file_to_use and user_file:
     if st.button("🚀 Präsentation jetzt konvertieren (1-Click Transform)"):
         with st.spinner("⚡ Folien werden 1:1 in die Vorlage übertragen (Farben & Schriftarten werden angepasst)..."):
             try:
-                out_buf, processed_slides = build_arsipa_presentation(template_file_to_use, user_file)
+                out_buf, processed_slides = build_arsipa_presentation(
+                    template_file_to_use, user_file, theme_mode=theme_mode
+                )
                 st.session_state['transformed_bytes'] = out_buf.getvalue()
                 st.session_state['transformed_slides'] = processed_slides
-                st.session_state['transformed_filename'] = f"IfG_{user_file.name}"
+                prefix = "Azubifit" if is_azubifit else "IfG"
+                st.session_state['transformed_filename'] = f"{prefix}_{user_file.name}"
                 st.session_state['last_processed_file'] = current_key
             except Exception as ex:
                 import traceback
                 tb_str = traceback.format_exc()
                 st.error(f"Verarbeitungsfehler aufgetreten: {ex}")
                 st.code(tb_str)
-                print(tb_str)
+                try:
+                    print(tb_str)
+                except Exception:
+                    pass
 
     if 'transformed_bytes' in st.session_state:
         processed_slides = st.session_state['transformed_slides']
         out_bytes = st.session_state['transformed_bytes']
         out_filename = st.session_state['transformed_filename']
 
+        target_brand_name = "Azubifit" if "Azubifit" in template_choice else "IfG / Arsipa"
+        target_palette_desc = "offiziellen Azubifit Grafikfarben (Grün/Gelb/Orange/Rot) und Deep Navy (#012641) Text" if "Azubifit" in template_choice else "offiziellen Unternehmensfarben"
+
         st.markdown(f"""
         <div class="ifg-success-box">
             <div class="ifg-success-title">🎉 Konvertierung erfolgreich abgeschlossen!</div>
             <p class="ifg-success-desc">
-                Alle <strong>{len(processed_slides)} Folien</strong> wurden im exakten 1:1 Original-Layout in die IfG / Arsipa Vorlage übertragen – mit angepasster <code>Abadi</code>-Typografie und offiziellen Unternehmensfarben.
+                Alle <strong>{len(processed_slides)} Folien</strong> wurden im exakten 1:1 Original-Layout in die {target_brand_name} Vorlage übertragen – mit angepasster <code>Abadi</code>-Typografie und {target_palette_desc}.
             </p>
         </div>
         """, unsafe_allow_html=True)

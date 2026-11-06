@@ -2023,16 +2023,59 @@ def restyle_sp_or_cxn(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, is_
 
     if tag == "sp":
         txbody = el.find(qn_p("txBody"))
-        restyle_txbody(
-            txbody,
-            theme_map=theme_map,
-            mapper=mapper,
-            bg_lum=effective_bg_lum,
-            is_heading_shape=is_heading_shape,
-            style_font_rgb=style_font_rgb,
-            font_scale=font_scale,
-            header_size_mode=header_size_mode
-        )
+        if txbody is not None:
+            is_callout_or_bubble = (
+                is_ellipse
+                or "callout" in prst_val.lower()
+                or prst_val in ("roundRect", "round1Rect", "round2SameRect", "round2DiagRect", "cloud", "balloon")
+            )
+            body_pr = txbody.find(qn_a("bodyPr"))
+            if body_pr is None:
+                body_pr = etree.Element(qn_a("bodyPr"))
+                txbody.insert(0, body_pr)
+
+            if is_callout_or_bubble:
+                # Tighten padding so text in oval / speech bubbles does not clip at curved edges
+                body_pr.set("lIns", "36000")  # ~0.04" margin (down from 0.10" default)
+                body_pr.set("rIns", "36000")
+                body_pr.set("tIns", "36000")
+                body_pr.set("bIns", "36000")
+                body_pr.set("wrap", "square")
+
+                # Enforce <a:normAutofit/> so text automatically shrinks dynamically on overflow
+                if body_pr.find(qn_a("normAutofit")) is None:
+                    for af in list(body_pr.findall(qn_a("noAutofit"))) + list(body_pr.findall(qn_a("spAutoFit"))):
+                        body_pr.remove(af)
+                    warp = body_pr.find(qn_a("prstTxWarp"))
+                    ins_idx = (list(body_pr).index(warp) + 1) if warp is not None else 0
+                    body_pr.insert(ins_idx, etree.Element(qn_a("normAutofit")))
+
+                # For dense text in callouts (>= 3 paragraphs or >= 12 words), apply gentle font scale
+                # so long compound words (e.g. "Beratungsdienst") fit on a single line
+                raw_words = "".join(t.text or "" for t in txbody.iter(qn_a("t"))).split()
+                p_count = len(txbody.findall(qn_a("p")))
+                if p_count >= 3 or len(raw_words) >= 12:
+                    font_scale = font_scale * 0.90
+            elif not is_heading_shape and header_size_mode not in ("title", "kapitel"):
+                # For any other regular shape containing text, ensure normAutofit prevents overflow
+                if body_pr.find(qn_a("normAutofit")) is None and body_pr.find(qn_a("spAutoFit")) is None:
+                    no_af = body_pr.find(qn_a("noAutofit"))
+                    if no_af is not None:
+                        body_pr.remove(no_af)
+                    warp = body_pr.find(qn_a("prstTxWarp"))
+                    ins_idx = (list(body_pr).index(warp) + 1) if warp is not None else 0
+                    body_pr.insert(ins_idx, etree.Element(qn_a("normAutofit")))
+
+            restyle_txbody(
+                txbody,
+                theme_map=theme_map,
+                mapper=mapper,
+                bg_lum=effective_bg_lum,
+                is_heading_shape=is_heading_shape,
+                style_font_rgb=style_font_rgb,
+                font_scale=font_scale,
+                header_size_mode=header_size_mode
+            )
 
     if has_opaque_fill and bbox is not None:
         z_bg_stack.append((bbox[0], bbox[1], bbox[2], bbox[3], effective_bg_lum))
@@ -4473,58 +4516,59 @@ def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide
             for b in bands:
                 b["orig_h"] = max(1, b["y2"] - b["y1"])
 
-            # Try pure downward shift/cascade without shrinking heights first
-            cur_y = target_top
-            trial_positions = []
-            for idx_b, b in enumerate(bands):
-                ny1 = max(b["y1"], cur_y) if idx_b > 0 else target_top
-                ny2 = ny1 + b["orig_h"]
-                trial_positions.append((ny1, ny2))
-                cur_y = ny2 + min_gap
+            # Compute available vertical height
+            avail_h = max(int(1.5 * 914400), max_bottom - target_top)
+            req_gaps = min_gap * max(0, len(bands) - 1)
+            sum_orig_h = sum(b["orig_h"] for b in bands)
+            total_needed = sum_orig_h + req_gaps
 
-            h_scale = 1.0
-            if trial_positions[-1][1] > max_bottom:
-                avail_h = max(int(1.5 * 914400), max_bottom - target_top)
-                req_gaps = min_gap * max(0, len(bands) - 1)
-                pic_bands = [b for b in bands if b.get("has_pic")]
-                text_bands = [b for b in bands if not b.get("has_pic")]
-                text_sum = sum(b["orig_h"] for b in text_bands)
-                pic_sum = sum(b["orig_h"] for b in pic_bands)
-                avail_for_pics = avail_h - req_gaps - text_sum
-
-                if pic_bands and pic_sum > 0 and avail_for_pics >= int(0.50 * pic_sum):
-                    pic_scale = max(0.55, avail_for_pics / float(pic_sum))
-                    cur_y = target_top
-                    trial_positions = []
-                    for b in bands:
-                        bh = int(round(b["orig_h"] * pic_scale)) if b.get("has_pic") else b["orig_h"]
-                        trial_positions.append((cur_y, cur_y + bh))
-                        cur_y += bh + min_gap
-                else:
-                    h_scale = max(0.75, (avail_h - req_gaps) / max(1, sum(b["orig_h"] for b in bands)))
-                    cur_y = target_top
-                    trial_positions = []
-                    for b in bands:
-                        bh = int(round(b["orig_h"] * h_scale))
-                        trial_positions.append((cur_y, cur_y + bh))
-                        cur_y += bh + min_gap
+            if total_needed <= avail_h:
+                # All bands fit comfortably without shrinking!
+                cur_y = target_top
+                trial_positions = []
+                for idx_b, b in enumerate(bands):
+                    if idx_b == 0:
+                        ny1 = target_top
+                    else:
+                        ny1 = max(b["y1"], cur_y)
+                    ny2 = ny1 + b["orig_h"]
+                    if ny2 > max_bottom and (max_bottom - b["orig_h"]) >= cur_y:
+                        ny2 = max_bottom
+                        ny1 = max_bottom - b["orig_h"]
+                    trial_positions.append((ny1, ny2))
+                    cur_y = ny2 + min_gap
+            else:
+                # Scale down uniformly to fit within available height (capped at 1.0)
+                b_scale_factor = min(1.0, max(0.55, float(avail_h - req_gaps) / float(max(1, sum_orig_h))))
+                cur_y = target_top
+                trial_positions = []
+                for b in bands:
+                    bh = int(round(b["orig_h"] * b_scale_factor))
+                    trial_positions.append((cur_y, cur_y + bh))
+                    cur_y += bh + min_gap
 
             for b, (ny1, ny2) in zip(bands, trial_positions):
                 old_by1 = b["y1"]
-                b_scale = (ny2 - ny1) / float(b["orig_h"]) if b["orig_h"] > 0 else 1.0
+                b_scale = min(1.0, (ny2 - ny1) / float(b["orig_h"])) if b["orig_h"] > 0 else 1.0
                 for m in b["members"]:
                     rel_y = (m["y1"] - old_by1) * b_scale
                     new_my1 = ny1 + rel_y
-                    new_mh = m["h"] * b_scale
+                    new_mh = int(round(m["h"] * b_scale))
                     new_mw = m["w"]
                     new_mx1 = m["x1"]
-                    if m["tag"] == "pic" and b_scale < 0.995:
-                        new_mw = m["w"] * b_scale
-                        new_mx1 = (m["x1"] + m["x2"]) / 2.0 - new_mw / 2.0
-                    m["x1"] = int(round(new_mx1))
+                    if m["tag"] == "pic":
+                        # STRICT ASPECT RATIO PRESERVATION:
+                        # Width must scale by exact same b_scale as height! Never stretch or distort images!
+                        new_mw = int(round(m["w"] * b_scale))
+                        new_mx1 = int(round((m["x1"] + m["x2"]) / 2.0 - new_mw / 2.0))
+                    elif m["tag"] == "sp" and m["h"] <= int(0.55 * 914400) and b_scale < 0.995:
+                        # Attached badge: scale width to match scaled picture
+                        new_mw = int(round(m["w"] * b_scale))
+                        new_mx1 = int(round((m["x1"] + m["x2"]) / 2.0 - new_mw / 2.0))
+                    m["x1"] = new_mx1
                     m["y1"] = int(round(new_my1))
-                    m["w"] = int(round(new_mw))
-                    m["h"] = int(round(new_mh))
+                    m["w"] = new_mw
+                    m["h"] = new_mh
                     m["x2"] = m["x1"] + m["w"]
                     m["y2"] = m["y1"] + m["h"]
                     ensure_explicit_xfrm(m["el"], m["x1"], m["y1"], m["w"], m["h"])
@@ -4562,7 +4606,7 @@ def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide
 
         if free_windows:
             win_y1, win_y2 = max(free_windows, key=lambda w_iv: w_iv[1] - w_iv[0])
-            if (win_y2 - win_y1) >= int(0.75 * 914400):
+            if (win_y2 - win_y1) >= int(0.50 * 914400):
                 body_pr = txbody.find(qn_a("bodyPr"))
                 if body_pr is None:
                     body_pr = etree.Element(qn_a("bodyPr"))
@@ -4577,8 +4621,14 @@ def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide
                         cur_lr = 91440
                     if cur_lr < min_lr:
                         body_pr.set(lr_k, str(min_lr))
-                if blocked or body_pr.get("anchor") in (None, "ctr"):
-                    body_pr.set("anchor", "ctr")
+                body_pr.set("anchor", "t")  # Top-aligned in window so text never overflows upward into portraits
+                # Enforce normAutofit so text fits within the window
+                if body_pr.find(qn_a("normAutofit")) is None:
+                    for af in list(body_pr.findall(qn_a("noAutofit"))) + list(body_pr.findall(qn_a("spAutoFit"))):
+                        body_pr.remove(af)
+                    warp = body_pr.find(qn_a("prstTxWarp"))
+                    ins_idx = (list(body_pr).index(warp) + 1) if warp is not None else 0
+                    body_pr.insert(ins_idx, etree.Element(qn_a("normAutofit")))
 
     # 3. Check if any shape covers the SlideMaster's top-right 'a.' logo or bottom-right Slide Number
     def _effective_color_at_box(box_tuple):

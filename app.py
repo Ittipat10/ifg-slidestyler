@@ -833,6 +833,33 @@ class DeckColorMapper:
             return self._match_cluster(rgb, self.light_clusters, LIGHT_BRAND_SWATCHES)
 
 
+class OriginalGraphicsColorMapper:
+    """
+    Color Mapper for IfG / Arsipa Typography & Text with Original Graphic/Object Colors:
+      1. Typography & Text:
+         - 100% Arsipa Corporate Design (Abadi font, IFG_NAVY #012641, IFG_CHARCOAL #3A4A63,
+           IFG_MUTED #8C96A5, IFG_WHITE #FFFFFF on dark backgrounds).
+      2. Graphics & Objects:
+         - Preserves 100% of the exact original colors from the source presentation
+           for shapes, fills, borders, connectors, tables, SmartArt diagrams, and charts.
+    """
+    is_azubifit = False
+    is_preserve_objects = True
+    preserve_chart_colors = True
+    brand_navy = IFG_NAVY
+    brand_light_blue = IFG_LIGHT_BLUE
+    brand_charcoal = IFG_CHARCOAL
+    brand_muted = IFG_MUTED
+    brand_white = IFG_WHITE
+
+    def __init__(self, user_prs=None):
+        self.chart_palette = CHART_DIAGRAM_PALETTE
+
+    def map_fill_or_line(self, rgb, role="fill"):
+        """Preserves the exact source color for all graphics, shapes, lines, tables, and objects."""
+        return rgb_to_hex(rgb)
+
+
 # ----------------- 2. FONT & TEXT RESTYLING HELPERS -----------------
 
 def is_symbol_text(text):
@@ -894,6 +921,7 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
         return
 
     primary_dark = getattr(mapper, "brand_navy", IFG_NAVY) if mapper else IFG_NAVY
+    primary_accent = getattr(mapper, "brand_light_blue", IFG_LIGHT_BLUE) if mapper else IFG_LIGHT_BLUE
     primary_charcoal = getattr(mapper, "brand_charcoal", IFG_CHARCOAL) if mapper else IFG_CHARCOAL
     primary_muted = getattr(mapper, "brand_muted", IFG_MUTED) if mapper else IFG_MUTED
 
@@ -928,6 +956,31 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                     if def_sf is not None:
                         write_srgb_into_parent(def_sf, IFG_WHITE if bg_lum < 0.48 else (primary_dark if is_heading_shape else primary_charcoal))
                     apply_corporate_font_to_rpr(def_rpr)
+
+                # Restyle bullet color (<a:buClr>) in lvlXpPr: IfG Light Blue / Cyan (#3EB9C0) on light bg, White on dark bg
+                ch_bu_clr = ch.find(qn_a("buClr"))
+                ch_bu_none = ch.find(qn_a("buNone"))
+                ch_has_bullet = (ch_bu_clr is not None) or (
+                    ch_bu_none is None and any(ch.find(qn_a(bt)) is not None for bt in ("buChar", "buAutoNum", "buBlip"))
+                )
+                if ch_has_bullet:
+                    new_bu_hex = IFG_WHITE if bg_lum < 0.60 else primary_accent
+                    if ch_bu_clr is None:
+                        ch_bu_clr_tx = ch.find(qn_a("buClrTx"))
+                        if ch_bu_clr_tx is not None:
+                            ch.remove(ch_bu_clr_tx)
+                        ch_bu_clr = etree.Element(qn_a("buClr"))
+                        target_tags = (
+                            "buClrTx", "buSzTx", "buSzPct", "buSzPts", "buFontTx", "buFont",
+                            "buNone", "buAutoNum", "buChar", "buBlip", "tabLst", "defRPr", "extLst"
+                        )
+                        ins_i = len(ch)
+                        for i_c, c_el in enumerate(ch):
+                            if c_el.tag.split("}")[-1] in target_tags:
+                                ins_i = i_c
+                                break
+                        ch.insert(ins_i, ch_bu_clr)
+                    write_srgb_into_parent(ch_bu_clr, new_bu_hex)
 
     # Determine largest font size in this text body to distinguish main title vs kicker line
     max_sz = max(lst_lvl_sizes.values(), default=0)
@@ -965,10 +1018,32 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                     write_srgb_into_parent(def_sf, IFG_WHITE if bg_lum < 0.60 else (primary_dark if is_heading_shape else primary_charcoal))
                 apply_corporate_font_to_rpr(def_rpr)
 
-            # Restyle explicit bullet color (<a:buClr>) if present; never touch <a:buFont>!
+            # Restyle bullet color (<a:buClr>): IfG Light Blue / Cyan (#3EB9C0) on light bg, White on dark bg
             bu_clr = ppr.find(qn_a("buClr"))
-            if bu_clr is not None:
-                new_bu_hex = IFG_WHITE if bg_lum < 0.60 else primary_dark
+            bu_none = ppr.find(qn_a("buNone"))
+            has_bullet_format = (bu_clr is not None) or (
+                bu_none is None and any(
+                    ppr.find(qn_a(bt)) is not None
+                    for bt in ("buChar", "buAutoNum", "buBlip")
+                )
+            )
+            if has_bullet_format:
+                new_bu_hex = IFG_WHITE if bg_lum < 0.60 else primary_accent
+                if bu_clr is None:
+                    bu_clr_tx = ppr.find(qn_a("buClrTx"))
+                    if bu_clr_tx is not None:
+                        ppr.remove(bu_clr_tx)
+                    bu_clr = etree.Element(qn_a("buClr"))
+                    target_tags = (
+                        "buClrTx", "buSzTx", "buSzPct", "buSzPts", "buFontTx", "buFont",
+                        "buNone", "buAutoNum", "buChar", "buBlip", "tabLst", "defRPr", "extLst"
+                    )
+                    ins_i = len(ppr)
+                    for i_c, c_el in enumerate(ppr):
+                        if c_el.tag.split("}")[-1] in target_tags:
+                            ins_i = i_c
+                            break
+                    ppr.insert(ins_i, bu_clr)
                 write_srgb_into_parent(bu_clr, new_bu_hex)
 
         for child in p:
@@ -1029,6 +1104,16 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                 elif getattr(mapper, "is_azubifit", False):
                     # Azubifit rule: ALL slide text is Deep Navy #012641 on light bg, White #FFFFFF on dark bg/images
                     new_txt_hex = primary_dark
+                elif getattr(mapper, "is_preserve_objects", False):
+                    # Arsipa Typography & Text: ALL slide text strictly follows Arsipa corporate colors
+                    orig_sat = rgb_saturation(orig_rgb)
+                    orig_lum = perceived_brightness(orig_rgb)
+                    if is_heading_shape or run_sz >= 2000 or (orig_sat >= 0.20 and orig_lum < 0.78):
+                        new_txt_hex = primary_dark
+                    elif 0.40 <= orig_lum <= 0.78 and orig_sat < 0.20 and (run_sz == 0 or run_sz < 1800):
+                        new_txt_hex = primary_muted
+                    else:
+                        new_txt_hex = primary_charcoal
                 else:
                     orig_sat = rgb_saturation(orig_rgb)
                     orig_lum = perceived_brightness(orig_rgb)
@@ -1772,6 +1857,26 @@ def restyle_sp_or_cxn(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, is_
     effective_bg_lum = underlying_lum
     has_opaque_fill = False
 
+    primary_accent = getattr(mapper, "brand_light_blue", IFG_LIGHT_BLUE) if mapper else IFG_LIGHT_BLUE
+    primary_dark = getattr(mapper, "brand_navy", IFG_NAVY) if mapper else IFG_NAVY
+
+    # Geometry & Semantic shape analysis (Underlines, Highlight strips, Accent circles, Icons)
+    geom = sp_pr.find(qn_a("prstGeom")) if sp_pr is not None else None
+    prst_val = geom.get("prst", "") if geom is not None else ""
+    is_ellipse = (prst_val in ("ellipse", "circle"))
+
+    is_heading_underline = False
+    is_highlight_strip = False
+    is_small_icon = False
+    if bbox is not None:
+        bx, by, bw, bh = bbox
+        if (bh <= int(0.09 * 914400) and bw >= int(0.5 * 914400) and by <= int(2.3 * 914400)) or (tag == "cxnSp" and by <= int(2.3 * 914400)):
+            is_heading_underline = True
+        elif (bw <= int(0.18 * 914400) and bh >= int(0.4 * 914400)) or (bh <= int(0.18 * 914400) and bw >= int(0.4 * 914400)):
+            is_highlight_strip = True
+        elif bw <= int(1.2 * 914400) and bh <= int(1.2 * 914400) and (tag == "cxnSp" or sp_pr.find(qn_a("custGeom")) is not None):
+            is_small_icon = True
+
     # 1. Restyle Fill (<p:spPr> or <p:style>/<a:fillRef>)
     if sp_pr is not None:
         no_fill = sp_pr.find(qn_a("noFill"))
@@ -1792,7 +1897,16 @@ def restyle_sp_or_cxn(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, is_
             res = resolve_color_from_parent(solid_fill, theme_map)
             if res is not None:
                 rgb, alpha_val = res
-                new_hex = mapper.map_fill_or_line(rgb, role="fill")
+                if not getattr(mapper, "is_preserve_objects", False) and is_heading_underline:
+                    new_hex = primary_accent
+                elif not getattr(mapper, "is_preserve_objects", False) and is_highlight_strip and rgb_saturation(rgb) >= 0.12:
+                    new_hex = primary_accent
+                elif not getattr(mapper, "is_preserve_objects", False) and is_ellipse and (rgb_saturation(rgb) >= 0.15 or 0.35 <= perceived_brightness(rgb) <= 0.80):
+                    new_hex = primary_accent
+                elif not getattr(mapper, "is_preserve_objects", False) and is_small_icon and rgb_saturation(rgb) >= 0.15:
+                    new_hex = primary_accent
+                else:
+                    new_hex = mapper.map_fill_or_line(rgb, role="fill")
                 write_srgb_into_parent(solid_fill, new_hex, alpha_val)
                 fill_lum = perceived_brightness(hex_to_rgb(new_hex))
                 alpha_f = (int(alpha_val) / 100000.0) if alpha_val is not None else 1.0
@@ -1838,7 +1952,14 @@ def restyle_sp_or_cxn(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, is_
             res = resolve_color_from_parent(ln_sf, theme_map)
             if res is not None:
                 rgb, alpha_val = res
-                new_ln_hex = mapper.map_fill_or_line(rgb, role="line")
+                if not getattr(mapper, "is_preserve_objects", False) and is_heading_underline:
+                    new_ln_hex = primary_accent
+                elif not getattr(mapper, "is_preserve_objects", False) and is_ellipse and (rgb_saturation(rgb) >= 0.12 or perceived_brightness(rgb) < 0.85):
+                    new_ln_hex = primary_accent
+                elif not getattr(mapper, "is_preserve_objects", False) and is_small_icon and rgb_saturation(rgb) >= 0.15:
+                    new_ln_hex = primary_accent
+                else:
+                    new_ln_hex = mapper.map_fill_or_line(rgb, role="line")
                 write_srgb_into_parent(ln_sf, new_ln_hex, alpha_val)
 
     if style_el is not None:
@@ -1847,7 +1968,12 @@ def restyle_sp_or_cxn(el, theme_map, mapper, z_bg_stack, default_bg_lum=1.0, is_
             res = resolve_color_from_parent(ln_ref, theme_map)
             if res is not None:
                 rgb, alpha_val = res
-                new_ln_hex = mapper.map_fill_or_line(rgb, role="line")
+                if not getattr(mapper, "is_preserve_objects", False) and is_heading_underline:
+                    new_ln_hex = primary_accent
+                elif not getattr(mapper, "is_preserve_objects", False) and is_ellipse and (rgb_saturation(rgb) >= 0.12 or perceived_brightness(rgb) < 0.85):
+                    new_ln_hex = primary_accent
+                else:
+                    new_ln_hex = mapper.map_fill_or_line(rgb, role="line")
                 write_srgb_into_parent(ln_ref, new_ln_hex, alpha_val)
 
     # 3. Resolve <p:style>/<a:fontRef> default text color & restyle <p:txBody>
@@ -2072,70 +2198,72 @@ def restyle_smartart_or_chart_xml(xml_bytes, partname_str, theme_map, mapper):
                     ax.set("val", ax_map[v])
 
         # 2a. Pie & Doughnut charts: apply official Arsipa slice colors with white dividers
-        for pie in root.findall(f".//{{{C_NS}}}pieChart") + root.findall(f".//{{{C_NS}}}doughnutChart") + root.findall(f".//{{{C_NS}}}pie3DChart"):
-            for ser in pie.findall(f"{{{C_NS}}}ser"):
-                dpts = ser.findall(f"{{{C_NS}}}dPt")
-                if dpts:
-                    for i, dpt in enumerate(dpts):
-                        c_hex = chart_palette[i % len(chart_palette)]
-                        sp_pr = _get_or_insert_dpt_sppr(dpt)
-                        _set_chart_solid_fill(sp_pr, c_hex)
-                        _set_chart_line_fill(sp_pr, "FFFFFF", width=19050)
-                else:
-                    pt_count_el = ser.find(f".//{{{C_NS}}}val//{{{C_NS}}}ptCount")
-                    num_pts = int(pt_count_el.get("val", "0")) if pt_count_el is not None else 0
-                    if num_pts > 0:
-                        for i in range(num_pts):
+        if not getattr(mapper, "preserve_chart_colors", False):
+            for pie in root.findall(f".//{{{C_NS}}}pieChart") + root.findall(f".//{{{C_NS}}}doughnutChart") + root.findall(f".//{{{C_NS}}}pie3DChart"):
+                for ser in pie.findall(f"{{{C_NS}}}ser"):
+                    dpts = ser.findall(f"{{{C_NS}}}dPt")
+                    if dpts:
+                        for i, dpt in enumerate(dpts):
                             c_hex = chart_palette[i % len(chart_palette)]
-                            dpt = etree.Element(f"{{{C_NS}}}dPt")
-                            idx_el = etree.SubElement(dpt, f"{{{C_NS}}}idx")
-                            idx_el.set("val", str(i))
                             sp_pr = _get_or_insert_dpt_sppr(dpt)
                             _set_chart_solid_fill(sp_pr, c_hex)
                             _set_chart_line_fill(sp_pr, "FFFFFF", width=19050)
-                            _insert_pie_dpt(ser, dpt)
+                    else:
+                        pt_count_el = ser.find(f".//{{{C_NS}}}val//{{{C_NS}}}ptCount")
+                        num_pts = int(pt_count_el.get("val", "0")) if pt_count_el is not None else 0
+                        if num_pts > 0:
+                            for i in range(num_pts):
+                                c_hex = chart_palette[i % len(chart_palette)]
+                                dpt = etree.Element(f"{{{C_NS}}}dPt")
+                                idx_el = etree.SubElement(dpt, f"{{{C_NS}}}idx")
+                                idx_el.set("val", str(i))
+                                sp_pr = _get_or_insert_dpt_sppr(dpt)
+                                _set_chart_solid_fill(sp_pr, c_hex)
+                                _set_chart_line_fill(sp_pr, "FFFFFF", width=19050)
+                                _insert_pie_dpt(ser, dpt)
 
-        # 2b. Bar & Column charts (Single series -> Deep Navy #012641; Multi series -> follows palette)
-        for bar in root.findall(f".//{{{C_NS}}}barChart") + root.findall(f".//{{{C_NS}}}bar3DChart"):
-            sers = bar.findall(f"{{{C_NS}}}ser")
-            for i, ser in enumerate(sers):
-                c_hex = chart_palette[i % len(chart_palette)]
-                sp_pr = _get_or_insert_ser_sppr(ser)
-                _set_chart_solid_fill(sp_pr, c_hex)
+            # 2b. Bar & Column charts (Single series -> Deep Navy #012641; Multi series -> follows palette)
+            for bar in root.findall(f".//{{{C_NS}}}barChart") + root.findall(f".//{{{C_NS}}}bar3DChart"):
+                sers = bar.findall(f"{{{C_NS}}}ser")
+                for i, ser in enumerate(sers):
+                    c_hex = chart_palette[i % len(chart_palette)]
+                    sp_pr = _get_or_insert_ser_sppr(ser)
+                    _set_chart_solid_fill(sp_pr, c_hex)
 
-        # 2c. Line & Scatter charts: apply official Arsipa line & marker colors
-        for line in root.findall(f".//{{{C_NS}}}lineChart") + root.findall(f".//{{{C_NS}}}scatterChart") + root.findall(f".//{{{C_NS}}}line3DChart"):
-            sers = line.findall(f"{{{C_NS}}}ser")
-            for i, ser in enumerate(sers):
-                c_hex = chart_palette[i % len(chart_palette)]
-                sp_pr = _get_or_insert_ser_sppr(ser)
-                _set_chart_line_fill(sp_pr, c_hex, width=28575)
-                marker = ser.find(f"{{{C_NS}}}marker")
-                if marker is not None:
-                    m_sppr = _get_or_insert_marker_sppr(marker)
-                    _set_chart_solid_fill(m_sppr, c_hex)
+            # 2c. Line & Scatter charts: apply official Arsipa line & marker colors
+            for line in root.findall(f".//{{{C_NS}}}lineChart") + root.findall(f".//{{{C_NS}}}scatterChart") + root.findall(f".//{{{C_NS}}}line3DChart"):
+                sers = line.findall(f"{{{C_NS}}}ser")
+                for i, ser in enumerate(sers):
+                    c_hex = chart_palette[i % len(chart_palette)]
+                    sp_pr = _get_or_insert_ser_sppr(ser)
+                    _set_chart_line_fill(sp_pr, c_hex, width=28575)
+                    marker = ser.find(f"{{{C_NS}}}marker")
+                    if marker is not None:
+                        m_sppr = _get_or_insert_marker_sppr(marker)
+                        _set_chart_solid_fill(m_sppr, c_hex)
 
-        # 2d. Area & Radar charts
-        for area in root.findall(f".//{{{C_NS}}}areaChart") + root.findall(f".//{{{C_NS}}}area3DChart"):
-            sers = area.findall(f"{{{C_NS}}}ser")
-            for i, ser in enumerate(sers):
-                c_hex = chart_palette[i % len(chart_palette)]
-                sp_pr = _get_or_insert_ser_sppr(ser)
-                _set_chart_solid_fill(sp_pr, c_hex)
+            # 2d. Area & Radar charts
+            for area in root.findall(f".//{{{C_NS}}}areaChart") + root.findall(f".//{{{C_NS}}}area3DChart"):
+                sers = area.findall(f"{{{C_NS}}}ser")
+                for i, ser in enumerate(sers):
+                    c_hex = chart_palette[i % len(chart_palette)]
+                    sp_pr = _get_or_insert_ser_sppr(ser)
+                    _set_chart_solid_fill(sp_pr, c_hex)
 
-        for radar in root.findall(f".//{{{C_NS}}}radarChart"):
-            sers = radar.findall(f"{{{C_NS}}}ser")
-            for i, ser in enumerate(sers):
-                c_hex = chart_palette[i % len(chart_palette)]
-                sp_pr = _get_or_insert_ser_sppr(ser)
-                _set_chart_line_fill(sp_pr, c_hex, width=25400)
+            for radar in root.findall(f".//{{{C_NS}}}radarChart"):
+                sers = radar.findall(f"{{{C_NS}}}ser")
+                for i, ser in enumerate(sers):
+                    c_hex = chart_palette[i % len(chart_palette)]
+                    sp_pr = _get_or_insert_ser_sppr(ser)
+                    _set_chart_line_fill(sp_pr, c_hex, width=25400)
 
     # 3. If SmartArt colors.xml or drawing.xml relied on a light/medium accent1 in source theme,
     # map accent1 -> accent2 (#3EB9C0 Corporate Cyan/Teal in Vorlage) so shapes stay vibrant & readable!
-    if "/diagrams/" in pname and old_acc1_lum >= 0.45:
-        for sc in root.findall(f".//{{{A_NS}}}schemeClr"):
-            if sc.get("val") == "accent1":
-                sc.set("val", "accent2")
+    if not getattr(mapper, "is_preserve_objects", False):
+        if "/diagrams/" in pname and old_acc1_lum >= 0.45:
+            for sc in root.findall(f".//{{{A_NS}}}schemeClr"):
+                if sc.get("val") == "accent1":
+                    sc.set("val", "accent2")
 
     # 4. Map explicit <a:srgbClr> colors (excluding shadow effectLst) into corporate palette
     for parent in root.iter():
@@ -4030,6 +4158,7 @@ def populate_vorlage_content_header(
     # If a 2+ line 28pt Titel extends down to ~1.36", gently clear any colliding foreground element right below it
     if est_lines >= 2 and title_lines:
         safe_title_bottom = tit_y + titel_cy + int(0.06 * 914400)
+        under_header = []
         for el in list(sp_tree):
             if el is ph_titel_el or el is ph_kapitel_el:
                 continue
@@ -4043,10 +4172,24 @@ def populate_vorlage_content_header(
             bw, bh = bx2 - bx1, by2 - by1
             if bh >= int(5.4 * 914400) or by1 < int(0.55 * 914400):
                 continue
-            if bx1 < hdr_x + header_cx and bx2 > hdr_x and by1 < safe_title_bottom:
-                dy_nudge = safe_title_bottom - by1
-                if by2 + dy_nudge <= int(7.18 * 914400):
-                    ensure_explicit_xfrm(el, bx1, by1 + dy_nudge, bw, bh)
+            if bx1 < hdr_x + header_cx and bx2 > hdr_x:
+                under_header.append({
+                    "el": el, "x1": bx1, "y1": by1, "x2": bx2, "y2": by2,
+                    "w": bw, "h": bh
+                })
+
+        # Sort top-to-bottom and cascade downward to eliminate collisions
+        under_header.sort(key=lambda it: (it["y1"], it["x1"]))
+        cur_clear_y = safe_title_bottom
+        min_pad = int(0.12 * 914400)
+        for it in under_header:
+            if it["y1"] < cur_clear_y:
+                dy_nudge = cur_clear_y - it["y1"]
+                it["y1"] += dy_nudge
+                it["y2"] += dy_nudge
+                if it["y2"] <= int(7.18 * 914400):
+                    ensure_explicit_xfrm(it["el"], it["x1"], it["y1"], it["w"], it["h"])
+            cur_clear_y = max(cur_clear_y, it["y2"] + min_pad)
 
     return [el for el in (ph_kapitel_el, ph_titel_el) if el is not None]
 
@@ -4240,30 +4383,50 @@ def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide
 
         col_fg = [
             it for it in fg_items
-            if col_x1 <= (it["x1"] + it["x2"]) / 2.0 <= col_x2
+            if (min(it["x2"], col_x2) - max(it["x1"], col_x1)) >= 0.20 * max(1, it["w"])
+            or col_x1 <= (it["x1"] + it["x2"]) / 2.0 <= col_x2
         ]
         col_fg.sort(key=lambda z: (z["y1"], z["x1"]))
 
         # Group horizontally-aligned items (e.g., 3 circular portraits) into row bands
         bands = []
         for it in col_fg:
+            raw_t = "".join(t.text or "" for t in it["el"].iter(qn_a("t"))).strip()
+            is_it_badge = (
+                it["tag"] == "sp"
+                and it["h"] <= int(0.55 * 914400)
+                and len(raw_t.split()) <= 4
+            )
             placed = False
             for b in bands:
                 b_h = max(1, b["y2"] - b["y1"])
-                v_ov = min(b["y2"], it["y2"]) - max(b["y1"], it["y1"])
-                if v_ov >= 0.45 * min(b_h, max(1, it["h"])) or abs(it["y1"] - b["y1"]) <= int(0.20 * 914400):
+                # 1. Badge attached to a picture in b
+                if is_it_badge and any(m["tag"] == "pic" and abs(m["x1"] - it["x1"]) <= int(0.35 * 914400) and it["y1"] <= m["y2"] + int(0.15 * 914400) for m in b["members"]):
                     b["members"].append(it)
                     b["y1"] = min(b["y1"], it["y1"])
                     b["y2"] = max(b["y2"], it["y2"])
                     b["x2"] = max(b["x2"], it["x2"])
                     placed = True
                     break
+                # 2. Side-by-side row mates (similar y1, minimal horizontal overlap)
+                if abs(it["y1"] - b["y1"]) <= int(0.25 * 914400) and abs(it["h"] - b_h) <= int(0.40 * 914400):
+                    if not any((min(m["x2"], it["x2"]) - max(m["x1"], it["x1"])) > 0.30 * min(m["w"], it["w"]) for m in b["members"]):
+                        b["members"].append(it)
+                        b["y1"] = min(b["y1"], it["y1"])
+                        b["y2"] = max(b["y2"], it["y2"])
+                        b["x2"] = max(b["x2"], it["x2"])
+                        if it["tag"] == "pic":
+                            b["has_pic"] = True
+                        placed = True
+                        break
+
             if not placed:
                 bands.append({
                     "members": [it],
                     "y1": it["y1"],
                     "y2": it["y2"],
                     "x2": it["x2"],
+                    "has_pic": (it["tag"] == "pic"),
                 })
 
         if bands and bands[0]["y1"] < safe_ly2:
@@ -4286,21 +4449,24 @@ def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide
 
             h_scale = 1.0
             if trial_positions[-1][1] > max_bottom:
-                # Pack tighter or gently scale heights so nothing touches the slide number or bottom edge
-                sum_h = sum(b["orig_h"] for b in bands)
                 avail_h = max(int(1.5 * 914400), max_bottom - target_top)
                 req_gaps = min_gap * max(0, len(bands) - 1)
-                if sum_h + req_gaps <= avail_h:
-                    extra = (avail_h - sum_h - req_gaps) / max(1, len(bands))
+                pic_bands = [b for b in bands if b.get("has_pic")]
+                text_bands = [b for b in bands if not b.get("has_pic")]
+                text_sum = sum(b["orig_h"] for b in text_bands)
+                pic_sum = sum(b["orig_h"] for b in pic_bands)
+                avail_for_pics = avail_h - req_gaps - text_sum
+
+                if pic_bands and pic_sum > 0 and avail_for_pics >= int(0.50 * pic_sum):
+                    pic_scale = max(0.55, avail_for_pics / float(pic_sum))
                     cur_y = target_top
                     trial_positions = []
                     for b in bands:
-                        ny1 = cur_y
-                        ny2 = ny1 + b["orig_h"]
-                        trial_positions.append((ny1, ny2))
-                        cur_y = ny2 + min_gap + extra
+                        bh = int(round(b["orig_h"] * pic_scale)) if b.get("has_pic") else b["orig_h"]
+                        trial_positions.append((cur_y, cur_y + bh))
+                        cur_y += bh + min_gap
                 else:
-                    h_scale = max(0.75, (avail_h - req_gaps) / max(1, sum_h))
+                    h_scale = max(0.75, (avail_h - req_gaps) / max(1, sum(b["orig_h"] for b in bands)))
                     cur_y = target_top
                     trial_positions = []
                     for b in bands:
@@ -4310,14 +4476,15 @@ def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide
 
             for b, (ny1, ny2) in zip(bands, trial_positions):
                 old_by1 = b["y1"]
+                b_scale = (ny2 - ny1) / float(b["orig_h"]) if b["orig_h"] > 0 else 1.0
                 for m in b["members"]:
-                    rel_y = (m["y1"] - old_by1) * h_scale
+                    rel_y = (m["y1"] - old_by1) * b_scale
                     new_my1 = ny1 + rel_y
-                    new_mh = m["h"] * h_scale
+                    new_mh = m["h"] * b_scale
                     new_mw = m["w"]
                     new_mx1 = m["x1"]
-                    if m["tag"] == "pic" and h_scale < 0.995:
-                        new_mw = m["w"] * h_scale
+                    if m["tag"] == "pic" and b_scale < 0.995:
+                        new_mw = m["w"] * b_scale
                         new_mx1 = (m["x1"] + m["x2"]) / 2.0 - new_mw / 2.0
                     m["x1"] = int(round(new_mx1))
                     m["y1"] = int(round(new_my1))
@@ -4430,6 +4597,209 @@ def resolve_logo_and_sidebar_layout(new_slide, slide_bg_lum, brand_assets, slide
     assign_clean_slide_shape_ids(new_slide._element)
 
 
+def resolve_all_slide_collisions(slide, safe_top=int(1.35 * 914400), safe_bottom=int(6.85 * 914400), min_gap=int(0.12 * 914400), protected_elems=None):
+    """
+    Comprehensive deterministic collision resolution pass for content slides.
+    Detects and eliminates any overlapping foreground elements (text-on-text, image-on-text, shape-on-text):
+    1. Collects all moveable foreground elements, excluding slide backdrops and protected Vorlage headers.
+    2. Groups elements into vertical columns / flows based on horizontal span.
+    3. Within each column, forms atomic units (card containers with children, portraits with attached badges, or row bands).
+    4. Detects vertical collisions and cascades downward with positive clearance (min_gap).
+    5. If total column height exceeds safe_bottom, reflows by gently scaling flexible picture heights
+       while preserving full text box heights.
+    """
+    protected_set = set(protected_elems or ())
+    sp_tree = slide.shapes._spTree
+
+    items = []
+    for el in list(sp_tree):
+        if el in protected_set:
+            continue
+        tag = el.tag.split("}")[-1]
+        if tag not in ("sp", "pic", "grpSp", "graphicFrame"):
+            continue
+        bbox = get_local_bbox(el)
+        if bbox is None:
+            continue
+        x1, y1, x2, y2 = bbox
+        w, h = x2 - x1, y2 - y1
+        if w <= 15000 and h <= 15000:
+            continue
+
+        # Skip slide-level full backdrops (full-bleed backgrounds or full-height colored sidebars)
+        if tag == "sp" and shape_has_visual_fill(el):
+            if (w >= int(10.5 * 914400) and h >= int(5.5 * 914400)) or (w >= int(2.5 * 914400) and h >= int(6.8 * 914400)):
+                continue
+
+        raw_t = "".join(t.text or "" for t in el.iter(qn_a("t"))).strip()
+        items.append({
+            "el": el,
+            "tag": tag,
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "w": w, "h": h,
+            "has_text": bool(raw_t),
+            "text": raw_t,
+        })
+
+    if len(items) < 2:
+        return
+
+    # Check for card containers (shape with fill completely containing other shapes)
+    containers = []
+    contained_elements = set()
+    for it in items:
+        if it["tag"] == "sp" and shape_has_visual_fill(it["el"]):
+            children = []
+            for other in items:
+                if other is not it and other["el"] not in contained_elements:
+                    if (it["x1"] - 40000 <= other["x1"] and other["x2"] <= it["x2"] + 40000 and
+                        it["y1"] - 40000 <= other["y1"] and other["y2"] <= it["y2"] + 40000):
+                        children.append(other)
+            if children:
+                containers.append({"container": it, "children": children})
+                for c in children:
+                    contained_elements.add(c["el"])
+
+    # Group into vertical columns based on horizontal overlap
+    non_contained = [it for it in items if it["el"] not in contained_elements]
+    columns = []
+    for it in sorted(non_contained, key=lambda z: z["x1"]):
+        placed = False
+        for col in columns:
+            col_x1 = min(m["x1"] for m in col)
+            col_x2 = max(m["x2"] for m in col)
+            h_ov = min(col_x2, it["x2"]) - max(col_x1, it["x1"])
+            min_w = min(col_x2 - col_x1, it["w"])
+            if h_ov >= 0.35 * max(1, min_w) or h_ov >= int(0.50 * 914400):
+                col.append(it)
+                placed = True
+                break
+        if not placed:
+            columns.append([it])
+
+    # Within each column, resolve vertical overlaps using row bands
+    for col in columns:
+        if len(col) < 2:
+            continue
+
+        bands = []
+        for it in sorted(col, key=lambda z: (z["y1"], z["x1"])):
+            # Check if it is a container
+            cont_entry = next((c for c in containers if c["container"] is it), None)
+            if cont_entry:
+                u_members = [it] + cont_entry["children"]
+                bands.append({
+                    "members": u_members,
+                    "y1": it["y1"],
+                    "y2": it["y2"],
+                    "orig_h": it["y2"] - it["y1"],
+                    "has_pic": False,
+                })
+                continue
+
+            is_badge = (
+                it["tag"] == "sp"
+                and it["h"] <= int(0.55 * 914400)
+                and len(it["text"].split()) <= 4
+            )
+            placed = False
+            for b in bands:
+                b_y1, b_y2 = b["y1"], b["y2"]
+                # 1. Badge attached to a picture in b
+                if is_badge and any(m["tag"] == "pic" and abs(m["x1"] - it["x1"]) <= int(0.35 * 914400) and it["y1"] <= m["y2"] + int(0.15 * 914400) for m in b["members"]):
+                    b["members"].append(it)
+                    b["y1"] = min(b["y1"], it["y1"])
+                    b["y2"] = max(b["y2"], it["y2"])
+                    b["orig_h"] = b["y2"] - b["y1"]
+                    placed = True
+                    break
+                # 2. Side-by-side row mates (similar y1, minimal horizontal overlap)
+                if abs(it["y1"] - b_y1) <= int(0.25 * 914400) and abs(it["h"] - (b_y2 - b_y1)) <= int(0.40 * 914400):
+                    if not any((min(m["x2"], it["x2"]) - max(m["x1"], it["x1"])) > 0.30 * min(m["w"], it["w"]) for m in b["members"]):
+                        b["members"].append(it)
+                        b["y1"] = min(b["y1"], it["y1"])
+                        b["y2"] = max(b["y2"], it["y2"])
+                        b["orig_h"] = b["y2"] - b["y1"]
+                        if it["tag"] == "pic":
+                            b["has_pic"] = True
+                        placed = True
+                        break
+
+            if not placed:
+                bands.append({
+                    "members": [it],
+                    "y1": it["y1"],
+                    "y2": it["y2"],
+                    "orig_h": it["y2"] - it["y1"],
+                    "has_pic": (it["tag"] == "pic"),
+                })
+
+        bands.sort(key=lambda u: u["y1"])
+
+        # Ensure top band does not collide with header zone
+        if bands and bands[0]["y1"] < safe_top:
+            dy_top = safe_top - bands[0]["y1"]
+            for b in bands:
+                b["y1"] += dy_top
+                b["y2"] += dy_top
+
+        # Detect and resolve overlaps cascading downwards
+        for i in range(len(bands) - 1):
+            curr = bands[i]
+            nxt = bands[i + 1]
+            if nxt["y1"] < curr["y2"] + min_gap:
+                dy = (curr["y2"] + min_gap) - nxt["y1"]
+                for j in range(i + 1, len(bands)):
+                    bands[j]["y1"] += dy
+                    bands[j]["y2"] += dy
+
+        # If lowest band exceeds safe_bottom, reflow
+        if bands[-1]["y2"] > safe_bottom:
+            total_h = sum(u["orig_h"] for u in bands)
+            avail_h = max(int(1.5 * 914400), safe_bottom - bands[0]["y1"])
+            req_gaps = min_gap * (len(bands) - 1)
+
+            pic_bands = [u for u in bands if u["has_pic"]]
+            text_bands = [u for u in bands if not u["has_pic"]]
+            text_sum = sum(u["orig_h"] for u in text_bands)
+            pic_sum = sum(u["orig_h"] for u in pic_bands)
+            avail_for_pics = avail_h - req_gaps - text_sum
+
+            if pic_bands and pic_sum > 0 and avail_for_pics >= int(0.50 * pic_sum):
+                scale_pic = max(0.55, avail_for_pics / float(pic_sum))
+                cur_y = bands[0]["y1"]
+                for u in bands:
+                    u["y1"] = cur_y
+                    if u["has_pic"]:
+                        u["orig_h"] = int(round(u["orig_h"] * scale_pic))
+                    u["y2"] = u["y1"] + u["orig_h"]
+                    cur_y = u["y2"] + min_gap
+            else:
+                compact_scale = max(0.70, (avail_h - req_gaps) / float(max(1, total_h)))
+                cur_y = bands[0]["y1"]
+                for u in bands:
+                    u["y1"] = cur_y
+                    u["orig_h"] = int(round(u["orig_h"] * compact_scale))
+                    u["y2"] = u["y1"] + u["orig_h"]
+                    cur_y = u["y2"] + min_gap
+
+        # Apply updated coordinates to elements
+        for u in bands:
+            u_base_y = min(m["y1"] for m in u["members"])
+            shift_y = u["y1"] - u_base_y
+            for m in u["members"]:
+                new_y = m["y1"] + shift_y
+                new_h = m["h"]
+                new_w = m["w"]
+                new_x = m["x1"]
+                if u["has_pic"] and m["tag"] == "pic" and u["orig_h"] != m["h"]:
+                    s_fac = u["orig_h"] / float(max(1, m["h"]))
+                    new_w = int(round(m["w"] * s_fac))
+                    new_x = m["x1"] + (m["w"] - new_w) // 2
+                    new_h = u["orig_h"]
+                ensure_explicit_xfrm(m["el"], new_x, new_y, new_w, new_h)
+
+
 def build_arsipa_presentation(template_file, user_file, theme_mode="ifg"):
     """
     Converts every slide (N -> N) from user_file into template_file (Vorlage):
@@ -4453,6 +4823,10 @@ def build_arsipa_presentation(template_file, user_file, theme_mode="ifg"):
         mapper = AzubifitColorMapper(user_prs)
         brand_assets["primary_dark_hex"] = AZUBI_TEXT_NAVY
         brand_assets["primary_accent_hex"] = AZUBI_GREEN
+    elif theme_mode == "ifg_original_graphics":
+        mapper = OriginalGraphicsColorMapper(user_prs)
+        brand_assets["primary_dark_hex"] = IFG_NAVY
+        brand_assets["primary_accent_hex"] = IFG_LIGHT_BLUE
     else:
         mapper = DeckColorMapper(user_prs)
         brand_assets["primary_dark_hex"] = IFG_NAVY
@@ -4748,6 +5122,15 @@ def build_arsipa_presentation(template_file, user_file, theme_mode="ifg"):
             protected_elems=hdr_elems,
         )
 
+        # Final deterministic collision resolution pass for all content elements
+        resolve_all_slide_collisions(
+            new_slide,
+            safe_top=int(1.35 * 914400) if use_vorlage_header else int(0.50 * 914400),
+            safe_bottom=int(6.85 * 914400),
+            min_gap=int(0.12 * 914400),
+            protected_elems=hdr_elems,
+        )
+
         clean_slide_addin_and_ole_shapes(new_slide._element)
         assign_clean_slide_shape_ids(new_slide._element)
 
@@ -4877,6 +5260,7 @@ st.markdown("""
 
 DEFAULT_TEMPLATES = {
     "⭐ IfG Vorlage Kurzfassung (Empfohlen – 6,7 MB, schnelle Ladezeit)": "Arsipa Vorlage/ifg_PowerPoint_Vorlage_Kurzfassung.pptx",
+    "🎨 IfG Vorlage Kurzfassung (Arsipa Typografie & Original-Grafikfarben)": "Arsipa Vorlage/ifg_PowerPoint_Vorlage_Kurzfassung.pptx",
     "🏢 IfG Vorlage Vollversion (47 Layouts – 37 MB)": "Arsipa Vorlage/Vorlage_Power_Point_Arsipa.pptx",
     "🌱 Azubifit Vorlage (Empfohlen – Azubifit Designfarben Grün/Multi-Akzent)": "Arsipa Vorlage/ifg_PowerPoint_Vorlage_Kurzfassung.pptx",
     "📁 Eigene Vorlagendatei (.pptx) hochladen": None
@@ -4908,7 +5292,13 @@ if template_file_to_use and user_file:
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
     is_azubifit = "Azubifit" in template_choice
-    theme_mode = "azubifit" if is_azubifit else "ifg"
+    is_orig_colors = "Original-Grafikfarben" in template_choice
+    if is_azubifit:
+        theme_mode = "azubifit"
+    elif is_orig_colors:
+        theme_mode = "ifg_original_graphics"
+    else:
+        theme_mode = "ifg"
 
     current_key = f"{getattr(user_file, 'name', '')}_{getattr(user_file, 'size', 0)}_{template_choice}"
     if st.session_state.get('last_processed_file') != current_key:
@@ -4924,7 +5314,12 @@ if template_file_to_use and user_file:
                 )
                 st.session_state['transformed_bytes'] = out_buf.getvalue()
                 st.session_state['transformed_slides'] = processed_slides
-                prefix = "Azubifit" if is_azubifit else "IfG"
+                if is_azubifit:
+                    prefix = "Azubifit"
+                elif is_orig_colors:
+                    prefix = "IfG_OrigColors"
+                else:
+                    prefix = "IfG"
                 st.session_state['transformed_filename'] = f"{prefix}_{user_file.name}"
                 st.session_state['last_processed_file'] = current_key
             except Exception as ex:
@@ -4942,8 +5337,15 @@ if template_file_to_use and user_file:
         out_bytes = st.session_state['transformed_bytes']
         out_filename = st.session_state['transformed_filename']
 
-        target_brand_name = "Azubifit" if "Azubifit" in template_choice else "IfG / Arsipa"
-        target_palette_desc = "offiziellen Azubifit Grafikfarben (Grün/Gelb/Orange/Rot) und Deep Navy (#012641) Text" if "Azubifit" in template_choice else "offiziellen Unternehmensfarben"
+        if is_azubifit:
+            target_brand_name = "Azubifit"
+            target_palette_desc = "offiziellen Azubifit Grafikfarben (Grün/Gelb/Orange/Rot) und Deep Navy (#012641) Text"
+        elif is_orig_colors:
+            target_brand_name = "IfG / Arsipa (Original-Grafikfarben)"
+            target_palette_desc = "offizieller Arsipa Typografie & Textfarben (Abadi, Navy #012641) bei Erhalt aller originalen Grafik- & Diagrammfarben"
+        else:
+            target_brand_name = "IfG / Arsipa"
+            target_palette_desc = "offiziellen Unternehmensfarben"
 
         st.markdown(f"""
         <div class="ifg-success-box">

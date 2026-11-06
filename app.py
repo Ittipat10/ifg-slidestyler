@@ -910,6 +910,87 @@ def apply_corporate_font_to_rpr(rpr_el, run_text=""):
             f_el.set("typeface", CORPORATE_FONT)
 
 
+def restyle_bullet_properties(p_or_lvl, bg_lum, primary_accent, is_azubifit=False):
+    """
+    Restyles bullet points according to Corporate Design requirements:
+    - Circle bullet character (•) with clean Arial bullet font (eliminating square/custom font bullets)
+    - For IfG presets (all 3): color is #3EB9C0 on light bg, #FFFFFF on dark bg (<a:buClr>)
+    - For Azubifit: keeps exact source bullet color (from source <a:buClr> or text-following <a:buClrTx>)
+    Strictly preserves DrawingML CT_TextParagraphProperties schema child order.
+    """
+    bu_none = p_or_lvl.find(qn_a("buNone"))
+    bu_autonum = p_or_lvl.find(qn_a("buAutoNum"))
+    if bu_none is not None or bu_autonum is not None:
+        return
+
+    bu_char = p_or_lvl.find(qn_a("buChar"))
+    bu_clr = p_or_lvl.find(qn_a("buClr"))
+    bu_clr_tx = p_or_lvl.find(qn_a("buClrTx"))
+    bu_blip = p_or_lvl.find(qn_a("buBlip"))
+
+    has_bullet = (bu_char is not None or bu_blip is not None or bu_clr is not None or bu_clr_tx is not None)
+    if not has_bullet:
+        return
+
+    # 1. Bullet Color (<a:buClr>)
+    if not is_azubifit:
+        new_bu_hex = IFG_WHITE if bg_lum < 0.60 else primary_accent
+        if bu_clr_tx is not None:
+            p_or_lvl.remove(bu_clr_tx)
+        if bu_clr is None:
+            bu_clr = etree.Element(qn_a("buClr"))
+            target_tags = (
+                "buSzTx", "buSzPct", "buSzPts", "buFontTx", "buFont",
+                "buNone", "buAutoNum", "buChar", "buBlip", "tabLst", "defRPr", "extLst"
+            )
+            ins_i = len(p_or_lvl)
+            for i_c, c_el in enumerate(p_or_lvl):
+                if c_el.tag.split("}")[-1] in target_tags:
+                    ins_i = i_c
+                    break
+            p_or_lvl.insert(ins_i, bu_clr)
+        write_srgb_into_parent(bu_clr, new_bu_hex)
+    else:
+        # Azubifit: keep original color from source
+        # If bu_clr is already present, leave it as is.
+        # If bu_clr_tx is present or neither is present, leave it as is.
+        pass
+
+    # 2. Bullet Font (Arial to guarantee standard round bullet display)
+    bu_font_tx = p_or_lvl.find(qn_a("buFontTx"))
+    if bu_font_tx is not None:
+        p_or_lvl.remove(bu_font_tx)
+    bu_font = p_or_lvl.find(qn_a("buFont"))
+    if bu_font is None:
+        bu_font = etree.Element(qn_a("buFont"))
+        target_tags = ("buNone", "buAutoNum", "buChar", "buBlip", "tabLst", "defRPr", "extLst")
+        ins_i = len(p_or_lvl)
+        for i_c, c_el in enumerate(p_or_lvl):
+            if c_el.tag.split("}")[-1] in target_tags:
+                ins_i = i_c
+                break
+        p_or_lvl.insert(ins_i, bu_font)
+    bu_font.attrib.clear()
+    bu_font.set("typeface", "Arial")
+    bu_font.set("panose", "020B0604020202020204")
+    bu_font.set("pitchFamily", "34")
+    bu_font.set("charset", "0")
+
+    # 3. Bullet Character (Circle •)
+    if bu_blip is not None:
+        p_or_lvl.remove(bu_blip)
+    if bu_char is None:
+        bu_char = etree.Element(qn_a("buChar"))
+        target_tags = ("tabLst", "defRPr", "extLst")
+        ins_i = len(p_or_lvl)
+        for i_c, c_el in enumerate(p_or_lvl):
+            if c_el.tag.split("}")[-1] in target_tags:
+                ins_i = i_c
+                break
+        p_or_lvl.insert(ins_i, bu_char)
+    bu_char.set("char", "•")
+
+
 def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, style_font_rgb=None, font_scale=1.0, header_size_mode=None):
     """
     Restyles all runs in a <p:txBody> / <a:txBody> to Abadi + Corporate Colors
@@ -920,6 +1001,7 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
     if txbody is None:
         return
 
+    is_azubifit = getattr(mapper, "is_azubifit", False)
     primary_dark = getattr(mapper, "brand_navy", IFG_NAVY) if mapper else IFG_NAVY
     primary_accent = getattr(mapper, "brand_light_blue", IFG_LIGHT_BLUE) if mapper else IFG_LIGHT_BLUE
     primary_charcoal = getattr(mapper, "brand_charcoal", IFG_CHARCOAL) if mapper else IFG_CHARCOAL
@@ -957,30 +1039,8 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                         write_srgb_into_parent(def_sf, IFG_WHITE if bg_lum < 0.48 else (primary_dark if is_heading_shape else primary_charcoal))
                     apply_corporate_font_to_rpr(def_rpr)
 
-                # Restyle bullet color (<a:buClr>) in lvlXpPr: IfG Light Blue / Cyan (#3EB9C0) on light bg, White on dark bg
-                ch_bu_clr = ch.find(qn_a("buClr"))
-                ch_bu_none = ch.find(qn_a("buNone"))
-                ch_has_bullet = (ch_bu_clr is not None) or (
-                    ch_bu_none is None and any(ch.find(qn_a(bt)) is not None for bt in ("buChar", "buAutoNum", "buBlip"))
-                )
-                if ch_has_bullet:
-                    new_bu_hex = IFG_WHITE if bg_lum < 0.60 else primary_accent
-                    if ch_bu_clr is None:
-                        ch_bu_clr_tx = ch.find(qn_a("buClrTx"))
-                        if ch_bu_clr_tx is not None:
-                            ch.remove(ch_bu_clr_tx)
-                        ch_bu_clr = etree.Element(qn_a("buClr"))
-                        target_tags = (
-                            "buClrTx", "buSzTx", "buSzPct", "buSzPts", "buFontTx", "buFont",
-                            "buNone", "buAutoNum", "buChar", "buBlip", "tabLst", "defRPr", "extLst"
-                        )
-                        ins_i = len(ch)
-                        for i_c, c_el in enumerate(ch):
-                            if c_el.tag.split("}")[-1] in target_tags:
-                                ins_i = i_c
-                                break
-                        ch.insert(ins_i, ch_bu_clr)
-                    write_srgb_into_parent(ch_bu_clr, new_bu_hex)
+                # Restyle bullet to circle (•) + appropriate corporate color
+                restyle_bullet_properties(ch, bg_lum, primary_accent, is_azubifit=is_azubifit)
 
     # Determine largest font size in this text body to distinguish main title vs kicker line
     max_sz = max(lst_lvl_sizes.values(), default=0)
@@ -1018,33 +1078,8 @@ def restyle_txbody(txbody, theme_map, mapper, bg_lum, is_heading_shape=False, st
                     write_srgb_into_parent(def_sf, IFG_WHITE if bg_lum < 0.60 else (primary_dark if is_heading_shape else primary_charcoal))
                 apply_corporate_font_to_rpr(def_rpr)
 
-            # Restyle bullet color (<a:buClr>): IfG Light Blue / Cyan (#3EB9C0) on light bg, White on dark bg
-            bu_clr = ppr.find(qn_a("buClr"))
-            bu_none = ppr.find(qn_a("buNone"))
-            has_bullet_format = (bu_clr is not None) or (
-                bu_none is None and any(
-                    ppr.find(qn_a(bt)) is not None
-                    for bt in ("buChar", "buAutoNum", "buBlip")
-                )
-            )
-            if has_bullet_format:
-                new_bu_hex = IFG_WHITE if bg_lum < 0.60 else primary_accent
-                if bu_clr is None:
-                    bu_clr_tx = ppr.find(qn_a("buClrTx"))
-                    if bu_clr_tx is not None:
-                        ppr.remove(bu_clr_tx)
-                    bu_clr = etree.Element(qn_a("buClr"))
-                    target_tags = (
-                        "buClrTx", "buSzTx", "buSzPct", "buSzPts", "buFontTx", "buFont",
-                        "buNone", "buAutoNum", "buChar", "buBlip", "tabLst", "defRPr", "extLst"
-                    )
-                    ins_i = len(ppr)
-                    for i_c, c_el in enumerate(ppr):
-                        if c_el.tag.split("}")[-1] in target_tags:
-                            ins_i = i_c
-                            break
-                    ppr.insert(ins_i, bu_clr)
-                write_srgb_into_parent(bu_clr, new_bu_hex)
+            # Restyle bullet to circle (•) + appropriate corporate color
+            restyle_bullet_properties(ppr, bg_lum, primary_accent, is_azubifit=is_azubifit)
 
         for child in p:
             ctag = child.tag.split("}")[-1]
